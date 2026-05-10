@@ -12,11 +12,12 @@ Mobile app (React Native + Expo + TypeScript) that helps travellers pack smarter
 1. **Auth** — Login + Register (email/password, JWT token persisted in AsyncStorage)
 2. **Onboarding · Method explainer** — "9 items. 27 outfits." with mini grid + stats
 3. **Onboarding · Trip create** — Destination autocomplete (geocode), start/end dates
-4. **Tab · Home (Dashboard)** — Trip cards (countdown, weather, packing progress), stats (outfits/items/efficiency ratio), wardrobe summary, theme toggle, logout
-5. **Tab · Studio** — Wardrobe library, add items via camera/library, category Top/Bottom/Layer, weight, tags, color swatches
-6. **Tab · Grid** — 3×3 builder. Tap empty slot → tap matching-category wardrobe item to fill. Tap filled slot to remove. Conflict checker (wrong category, opposite tags). "Generate 27 Outfits" enabled only when 9/9 valid
+4. **Tab · Home (Dashboard)** — Trip cards (countdown, weather, packing progress), stats (outfits/items/efficiency ratio), wardrobe summary, **climate-fit banner** (warns when grid tags conflict with destination weather), theme toggle, logout, **Templates** entry
+5. **Tab · Studio** — Wardrobe library, add items via camera/library, category Top/Bottom/Layer, weight, tags, **server-extracted color palette via Pillow** (`/api/palette`)
+6. **Tab · Grid** — 3×3 builder with **real drag-and-drop** (long-press + Pan gesture via react-native-gesture-handler + reanimated). Drop on matching-category slot fills it; wrong-category drop rejects with alert. Tap filled slot to remove. Conflict checker. "Generate 27 Outfits" enabled only when 9/9 valid
 7. **Tab · Lookbook** — 27 outfit cards (top/bottom/layer + occasion tag), heart favorites, occasion editor, filter chips (All/Favorites/Casual/Formal/Travel/Active/Modest)
 8. **Tab · Pack (Checklist)** — Grid items + essentials with checkboxes & weights. Sticky weight bar showing kg vs 7kg carry-on limit (warning when over). Add custom essentials.
+9. **Stack · Templates** — Browse 4 official community templates (Tokyo Autumn, Lisbon Coastal, Reykjavík Subzero, Bali Tropical). Detail view shows description + 9-item recipe + Like + Apply. Apply clones 9 items into your wardrobe and writes the trip grid.
 
 ## API surface (all under `/api`)
 - Auth: `POST /auth/register`, `POST /auth/login`, `GET /auth/me`
@@ -40,7 +41,6 @@ See `/app/memory/test_credentials.md` (test@packr.app / test1234)
 
 ## Future (Phase 2)
 - AI background removal (Gemini Nano Banana, paid via user's own LLM key — commission model)
-- Color palette extraction from real photos
-- Community grid templates ("7 Days in Tokyo — Autumn Minimalist")
-- Weather-fit warnings against grid (climate compatibility)
-- Live drag-and-drop with react-native-reanimated gesture interactions
+- Per-user like idempotency on templates
+- Wardrobe cleanup of previous from-template clones on re-apply
+- Image-size guard on /api/palette (decompression-bomb protection)
