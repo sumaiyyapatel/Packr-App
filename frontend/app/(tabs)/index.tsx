@@ -14,8 +14,9 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, Trip } from '../../src/lib/api';
+import { api, Trip, WardrobeItem } from '../../src/lib/api';
 import { gridProgress, isGridComplete } from '../../src/lib/sudoku';
+import { checkClimateFit } from '../../src/lib/climate';
 
 const WEATHER_ICON: Record<number, string> = {
   0: 'sunny-outline',
@@ -78,6 +79,17 @@ export default function Dashboard() {
   }, [trips]);
 
   const selected = trips.find((t) => t.id === selectedTripId) || trips[0];
+
+  const itemsById = useMemo(() => {
+    const m: Record<string, WardrobeItem> = {};
+    for (const w of wardrobe) m[w.id] = w;
+    return m;
+  }, [wardrobe]);
+
+  const climateFit = useMemo(() => {
+    if (!selected) return null;
+    return checkClimateFit(selected.grid, itemsById, weather[selected.id]);
+  }, [selected, itemsById, weather]);
 
   const totalOutfits = selected && isGridComplete(selected.grid) ? 27 : 0;
   const itemsPacked = selected ? selected.grid.filter(Boolean).length : 0;
@@ -241,6 +253,52 @@ export default function Dashboard() {
           </View>
         </View>
 
+        {climateFit && climateFit.warnings.length > 0 && (
+          <View
+            testID="climate-warning"
+            style={[
+              styles.climateBox,
+              { borderColor: c.warning, backgroundColor: c.warning + '15' },
+            ]}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+              <Ionicons name="warning-outline" size={14} color={c.warning} />
+              <Text
+                style={{
+                  color: c.warning, fontSize: 11, letterSpacing: 1.5, fontWeight: '600',
+                  marginLeft: 6,
+                }}
+              >
+                CLIMATE FIT · {climateFit.climate.toUpperCase()}
+              </Text>
+            </View>
+            {climateFit.warnings.map((w, i) => (
+              <Text key={i} style={{ color: c.textPrimary, fontSize: 12, marginTop: 2 }}>
+                • {w}
+              </Text>
+            ))}
+          </View>
+        )}
+
+        {climateFit && climateFit.warnings.length === 0 && climateFit.climate !== 'unknown' && itemsPacked > 0 && (
+          <View
+            testID="climate-ok"
+            style={[styles.climateBox, { borderColor: c.accent, backgroundColor: c.accent + '12' }]}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Ionicons name="checkmark-circle-outline" size={14} color={c.accent} />
+              <Text
+                style={{
+                  color: c.accent, fontSize: 11, letterSpacing: 1.5, fontWeight: '600',
+                  marginLeft: 6,
+                }}
+              >
+                CLIMATE FIT · {climateFit.climate.toUpperCase()} · LOOKS GOOD
+              </Text>
+            </View>
+          </View>
+        )}
+
         <View style={{ height: 24 }} />
 
         {/* Wardrobe summary */}
@@ -281,6 +339,18 @@ export default function Dashboard() {
           ]}
         >
           <Text style={[styles.ctaText, { color: c.accent }]}>BUILD THE GRID →</Text>
+        </Pressable>
+
+        <View style={{ height: 12 }} />
+        <Pressable
+          testID="dashboard-templates-button"
+          onPress={() => router.push('/templates')}
+          style={({ pressed }) => [
+            styles.cta,
+            { borderColor: c.borderActive, opacity: pressed ? 0.85 : 1 },
+          ]}
+        >
+          <Text style={[styles.ctaText, { color: c.textPrimary }]}>BROWSE TEMPLATES</Text>
         </Pressable>
 
         <View style={{ height: 32 }} />
@@ -346,4 +416,5 @@ const styles = StyleSheet.create({
   dot: { width: 8, height: 8, borderRadius: 4 },
   cta: { borderWidth: 1, borderRadius: 4, padding: 16, alignItems: 'center' },
   ctaText: { fontSize: 13, letterSpacing: 2, fontWeight: '600' },
+  climateBox: { borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 12 },
 });

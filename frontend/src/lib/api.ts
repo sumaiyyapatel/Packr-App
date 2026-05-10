@@ -46,3 +46,27 @@ export type Trip = {
   extras: { id: string; name: string; category: string; weight_kg: number }[];
   created_at: string;
 };
+
+export type TemplateItem = {
+  name: string;
+  category: 'top' | 'bottom' | 'layer';
+  colors: string[];
+  tags: string[];
+  image: string;
+};
+
+export type Template = {
+  id: string;
+  title: string;
+  description: string;
+  destination: string;
+  days: number;
+  season: string;
+  climate: 'cold' | 'cool' | 'mild' | 'warm' | 'tropical';
+  items: TemplateItem[];
+  author_id?: string | null;
+  author_name?: string | null;
+  is_official: boolean;
+  likes: number;
+  created_at: string;
+};

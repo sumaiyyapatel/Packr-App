@@ -244,11 +244,21 @@ function AddItemModal({
         .split(/[,\s]+/)
         .map((t) => t.trim())
         .filter(Boolean);
+      // Extract real colors from photo if provided
+      let palette = pickPaletteFromTags(tags);
+      if (imageBase64) {
+        try {
+          const pr = await api.post('/palette', { image: imageBase64 });
+          if (pr.data?.colors?.length) palette = pr.data.colors;
+        } catch {
+          // fall back to tag palette
+        }
+      }
       const r = await api.post('/wardrobe', {
         name: name.trim(),
         category,
         image: imageBase64 || '',
-        colors: pickPaletteFromTags(tags),
+        colors: palette,
         weight_kg: parseFloat(weight) || 0.3,
         tags,
       });

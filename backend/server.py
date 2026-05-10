@@ -5,6 +5,8 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import io
+import base64
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
@@ -13,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 import httpx
+from PIL import Image
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -333,6 +336,245 @@ async def geocode(q: str):
 @api_router.get("/")
 async def root():
     return {'service': 'Packr', 'status': 'ok'}
+
+# ========== COLOR PALETTE EXTRACTION ==========
+class PaletteRequest(BaseModel):
+    image: str  # data:image/jpeg;base64,... or raw base64
+
+@api_router.post("/palette")
+async def extract_palette(payload: PaletteRequest, user: dict = Depends(get_current_user)):
+    raw = payload.image
+    if ',' in raw and raw.startswith('data:'):
+        raw = raw.split(',', 1)[1]
+    try:
+        data = base64.b64decode(raw)
+        img = Image.open(io.BytesIO(data)).convert('RGB')
+        # downsize for speed
+        img.thumbnail((128, 128))
+        # quantize to 6 colors and pick top 3 by frequency, skipping near-white/near-black background
+        q = img.quantize(colors=6, method=Image.Quantize.MEDIANCUT)
+        palette = q.getpalette() or []
+        counts = sorted(q.getcolors() or [], reverse=True)  # [(count, idx), ...]
+        hexes: List[str] = []
+        for cnt, idx in counts:
+            r, g, b = palette[idx * 3], palette[idx * 3 + 1], palette[idx * 3 + 2]
+            # skip very near white or very near black so we keep garment color
+            if r > 240 and g > 240 and b > 240:
+                continue
+            if r < 15 and g < 15 and b < 15:
+                continue
+            hexes.append(f'#{r:02X}{g:02X}{b:02X}')
+            if len(hexes) >= 3:
+                break
+        if not hexes:
+            hexes = ['#888888']
+        return {'colors': hexes}
+    except Exception as e:
+        raise HTTPException(400, f'Could not parse image: {e}')
+
+# ========== COMMUNITY TEMPLATES ==========
+class TemplateItem(BaseModel):
+    name: str
+    category: str  # top|bottom|layer
+    colors: List[str] = []
+    tags: List[str] = []
+    image: str = ''
+
+class TemplateCreate(BaseModel):
+    title: str
+    description: str
+    destination: str
+    days: int
+    season: str
+    climate: str  # cold|mild|warm|tropical|cool
+    items: List[TemplateItem]  # length 9 expected (col 0=top, 1=bottom, 2=layer rows)
+
+class Template(TemplateCreate):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    author_id: Optional[str] = None
+    author_name: Optional[str] = None
+    is_official: bool = False
+    likes: int = 0
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+@api_router.get("/templates", response_model=List[Template])
+async def list_templates():
+    docs = await db.templates.find({}, {'_id': 0}).sort([('is_official', -1), ('likes', -1)]).to_list(200)
+    return [Template(**d) for d in docs]
+
+@api_router.get("/templates/{tid}", response_model=Template)
+async def get_template(tid: str):
+    doc = await db.templates.find_one({'id': tid}, {'_id': 0})
+    if not doc:
+        raise HTTPException(404, 'Template not found')
+    return Template(**doc)
+
+@api_router.post("/templates", response_model=Template)
+async def publish_template(payload: TemplateCreate, user: dict = Depends(get_current_user)):
+    if len(payload.items) != 9:
+        raise HTTPException(400, 'Template must include exactly 9 items')
+    tpl = Template(
+        author_id=user['id'],
+        author_name=user.get('name') or user['email'].split('@')[0],
+        is_official=False,
+        **payload.dict(),
+    )
+    await db.templates.insert_one(tpl.dict())
+    return tpl
+
+@api_router.post("/templates/{tid}/like", response_model=Template)
+async def like_template(tid: str, user: dict = Depends(get_current_user)):
+    await db.templates.update_one({'id': tid}, {'$inc': {'likes': 1}})
+    doc = await db.templates.find_one({'id': tid}, {'_id': 0})
+    if not doc:
+        raise HTTPException(404, 'Template not found')
+    return Template(**doc)
+
+class ApplyTemplate(BaseModel):
+    trip_id: str
+
+@api_router.post("/templates/{tid}/apply", response_model=Trip)
+async def apply_template(tid: str, payload: ApplyTemplate, user: dict = Depends(get_current_user)):
+    """Clone the 9 template items into the user's wardrobe (with a #from-template tag)
+    and assign them to the trip's grid in slot order."""
+    tpl = await db.templates.find_one({'id': tid}, {'_id': 0})
+    if not tpl:
+        raise HTTPException(404, 'Template not found')
+    trip = await db.trips.find_one({'id': payload.trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+
+    new_grid: List[Optional[str]] = [None] * 9
+    for slot, raw in enumerate(tpl.get('items', [])[:9]):
+        item_id = str(uuid.uuid4())
+        item = {
+            'id': item_id,
+            'user_id': user['id'],
+            'name': raw.get('name', f'Item {slot + 1}'),
+            'category': raw.get('category', ['top', 'bottom', 'layer'][slot % 3]),
+            'image': raw.get('image', ''),
+            'colors': raw.get('colors', []),
+            'weight_kg': 0.3,
+            'tags': list(set((raw.get('tags') or []) + ['from-template'])),
+            'created_at': datetime.now(timezone.utc),
+        }
+        await db.wardrobe.insert_one(item.copy())
+        new_grid[slot] = item_id
+
+    await db.trips.update_one(
+        {'id': payload.trip_id, 'user_id': user['id']},
+        {'$set': {'grid': new_grid}}
+    )
+    trip = await db.trips.find_one({'id': payload.trip_id, 'user_id': user['id']}, {'_id': 0})
+    return Trip(**trip)
+
+# ========== Seed default templates (idempotent) ==========
+DEFAULT_TEMPLATES = [
+    {
+        'title': '7 Days in Tokyo — Autumn Minimalist',
+        'description': 'Cool autumn days, layered architectural fits. Heavy on neutrals, breathable wool blends, and one statement layer for evenings.',
+        'destination': 'Tokyo, Japan',
+        'days': 7,
+        'season': 'Autumn',
+        'climate': 'cool',
+        'is_official': True,
+        'author_name': 'Packr',
+        'likes': 412,
+        'items': [
+            {'name': 'Charcoal merino tee', 'category': 'top', 'colors': ['#3A3A3A'], 'tags': ['casual', 'layer-friendly']},
+            {'name': 'Black tapered chinos', 'category': 'bottom', 'colors': ['#1F1F1F'], 'tags': ['casual', 'business']},
+            {'name': 'Light wool overshirt', 'category': 'layer', 'colors': ['#7A7060'], 'tags': ['layer', 'cool']},
+            {'name': 'Off-white linen shirt', 'category': 'top', 'colors': ['#F2EEDF'], 'tags': ['business', 'casual']},
+            {'name': 'Indigo straight jeans', 'category': 'bottom', 'colors': ['#2A3F5F'], 'tags': ['casual']},
+            {'name': 'Heavyweight zip hoodie', 'category': 'layer', 'colors': ['#222222'], 'tags': ['casual', 'cool']},
+            {'name': 'Navy long sleeve henley', 'category': 'top', 'colors': ['#1B2A41'], 'tags': ['casual', 'modest']},
+            {'name': 'Olive utility trousers', 'category': 'bottom', 'colors': ['#56603F'], 'tags': ['casual']},
+            {'name': 'Beige trench coat', 'category': 'layer', 'colors': ['#C9B68B'], 'tags': ['formal', 'business']},
+        ],
+    },
+    {
+        'title': '5 Days in Lisbon — Coastal Capsule',
+        'description': 'Warm sun, ocean breeze, evening tile alleys. Light fabrics with one warm-toned linen layer.',
+        'destination': 'Lisbon, Portugal',
+        'days': 5,
+        'season': 'Late Spring',
+        'climate': 'warm',
+        'is_official': True,
+        'author_name': 'Packr',
+        'likes': 287,
+        'items': [
+            {'name': 'White cotton tee', 'category': 'top', 'colors': ['#FFFFFF'], 'tags': ['casual', 'tropical']},
+            {'name': 'Sand chinos', 'category': 'bottom', 'colors': ['#D7C7A0'], 'tags': ['casual', 'business']},
+            {'name': 'Camel linen overshirt', 'category': 'layer', 'colors': ['#B68C5A'], 'tags': ['layer', 'tropical']},
+            {'name': 'Navy striped tee', 'category': 'top', 'colors': ['#1B2A41', '#FFFFFF'], 'tags': ['casual']},
+            {'name': 'Off-white shorts', 'category': 'bottom', 'colors': ['#F2EEDF'], 'tags': ['casual', 'beach']},
+            {'name': 'Light denim jacket', 'category': 'layer', 'colors': ['#5C7393'], 'tags': ['casual', 'layer']},
+            {'name': 'Pale blue oxford', 'category': 'top', 'colors': ['#A7C0D9'], 'tags': ['business', 'formal']},
+            {'name': 'Cream wide-leg trousers', 'category': 'bottom', 'colors': ['#E6DFC9'], 'tags': ['formal', 'modest']},
+            {'name': 'Black bomber', 'category': 'layer', 'colors': ['#0A0A0A'], 'tags': ['casual']},
+        ],
+    },
+    {
+        'title': '10 Days in Reykjavík — Subzero',
+        'description': 'Glacier wind, geothermal pools, Northern lights. Wool, fleece, and one waterproof shell.',
+        'destination': 'Reykjavík, Iceland',
+        'days': 10,
+        'season': 'Winter',
+        'climate': 'cold',
+        'is_official': True,
+        'author_name': 'Packr',
+        'likes': 198,
+        'items': [
+            {'name': 'Black thermal base', 'category': 'top', 'colors': ['#0F0F0F'], 'tags': ['snow', 'casual']},
+            {'name': 'Wool joggers', 'category': 'bottom', 'colors': ['#3D3D3D'], 'tags': ['snow', 'casual']},
+            {'name': 'Down puffer jacket', 'category': 'layer', 'colors': ['#0A0A0A'], 'tags': ['snow', 'layer']},
+            {'name': 'Cream fisherman knit', 'category': 'top', 'colors': ['#E6DFC9'], 'tags': ['snow', 'casual', 'modest']},
+            {'name': 'Charcoal wool trousers', 'category': 'bottom', 'colors': ['#3A3A3A'], 'tags': ['business', 'snow']},
+            {'name': 'Forest fleece pullover', 'category': 'layer', 'colors': ['#2F4F3E'], 'tags': ['snow', 'casual']},
+            {'name': 'Navy turtleneck', 'category': 'top', 'colors': ['#1B2A41'], 'tags': ['snow', 'modest', 'business']},
+            {'name': 'Black insulated jeans', 'category': 'bottom', 'colors': ['#161616'], 'tags': ['snow', 'casual']},
+            {'name': 'Olive shell parka', 'category': 'layer', 'colors': ['#56603F'], 'tags': ['snow', 'layer']},
+        ],
+    },
+    {
+        'title': '6 Days in Bali — Tropical Light',
+        'description': 'Humidity-friendly, breathable fabrics. Linen, viscose, breezy silhouettes.',
+        'destination': 'Bali, Indonesia',
+        'days': 6,
+        'season': 'Dry season',
+        'climate': 'tropical',
+        'is_official': True,
+        'author_name': 'Packr',
+        'likes': 356,
+        'items': [
+            {'name': 'White linen tee', 'category': 'top', 'colors': ['#F8F4E9'], 'tags': ['tropical', 'beach']},
+            {'name': 'Khaki linen shorts', 'category': 'bottom', 'colors': ['#B5A06A'], 'tags': ['beach', 'tropical']},
+            {'name': 'Open-weave overshirt', 'category': 'layer', 'colors': ['#D7C7A0'], 'tags': ['tropical', 'beach']},
+            {'name': 'Pastel pink tee', 'category': 'top', 'colors': ['#F0C8C0'], 'tags': ['casual', 'tropical']},
+            {'name': 'Loose ivory pants', 'category': 'bottom', 'colors': ['#F2EEDF'], 'tags': ['modest', 'tropical']},
+            {'name': 'Light viscose shirt', 'category': 'layer', 'colors': ['#A7C0D9'], 'tags': ['tropical', 'modest']},
+            {'name': 'Sage tank', 'category': 'top', 'colors': ['#8DA399'], 'tags': ['beach', 'gym']},
+            {'name': 'Sand cargo shorts', 'category': 'bottom', 'colors': ['#D7C7A0'], 'tags': ['beach', 'casual']},
+            {'name': 'Navy windbreaker', 'category': 'layer', 'colors': ['#1B2A41'], 'tags': ['casual', 'tropical']},
+        ],
+    },
+]
+
+@app.on_event("startup")
+async def seed_templates():
+    try:
+        existing = await db.templates.count_documents({'is_official': True})
+        if existing >= len(DEFAULT_TEMPLATES):
+            return
+        for t in DEFAULT_TEMPLATES:
+            already = await db.templates.find_one({'title': t['title'], 'is_official': True})
+            if already:
+                continue
+            tpl = Template(**t)
+            await db.templates.insert_one(tpl.dict())
+        logger.info(f'Seeded {len(DEFAULT_TEMPLATES)} official templates')
+    except Exception as e:
+        logger.warning(f'Template seed skipped: {e}')
 
 app.include_router(api_router)
 

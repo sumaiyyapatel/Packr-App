@@ -28,6 +28,7 @@ function RootGate() {
     if (!hydrated) return;
     const inAuth = segments[0] === '(auth)';
     const inTabs = segments[0] === '(tabs)';
+    const inTemplates = segments[0] === 'templates';
 
     if (!user) {
       if (!inAuth) router.replace('/(auth)/login');
@@ -43,7 +44,7 @@ function RootGate() {
       if (segments[0] !== 'onboarding') router.replace('/onboarding/trip-create');
       return;
     }
-    if (!inTabs) router.replace('/(tabs)');
+    if (!inTabs && !inTemplates) router.replace('/(tabs)');
   }, [hydrated, user, onboarded, trips.length, segments, router]);
 
   if (!hydrated || !fontsLoaded) {
@@ -61,6 +62,7 @@ function RootGate() {
         <Stack.Screen name="(auth)" />
         <Stack.Screen name="onboarding" />
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="templates" />
       </Stack>
     </>
   );

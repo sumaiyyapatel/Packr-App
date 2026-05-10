@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  runOnJS,
+} from 'react-native-reanimated';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
 import { api, WardrobeItem } from '../../src/lib/api';
@@ -21,6 +28,8 @@ import {
   checkConflicts,
   isGridComplete,
 } from '../../src/lib/sudoku';
+
+type SlotRect = { x: number; y: number; w: number; h: number };
 
 export default function GridScreen() {
   const { c } = useTheme();
@@ -32,8 +41,10 @@ export default function GridScreen() {
 
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0];
   const [grid, setGrid] = useState<(string | null)[]>(trip?.grid || Array(9).fill(null));
-  const [activeSlot, setActiveSlot] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Slot rects in absolute screen coordinates (set via onLayout + measure)
+  const slotRects = useRef<Record<number, SlotRect>>({});
 
   useEffect(() => {
     if (trip) setGrid(trip.grid);
@@ -50,46 +61,6 @@ export default function GridScreen() {
   const filled = grid.filter(Boolean).length;
   const complete = isGridComplete(grid);
 
-  const onSlotPress = async (slot: number) => {
-    if (grid[slot]) {
-      // unassign
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-      const next = [...grid];
-      next[slot] = null;
-      setGrid(next);
-      saveGrid(next);
-      return;
-    }
-    setActiveSlot(slot);
-    Haptics.selectionAsync().catch(() => {});
-  };
-
-  const onItemPress = (item: WardrobeItem) => {
-    if (activeSlot == null) {
-      Alert.alert('Pick a slot', 'Tap an empty slot first, then choose an item.');
-      return;
-    }
-    const expected = categoryForSlot(activeSlot);
-    if (item.category !== expected) {
-      Alert.alert(
-        'Wrong category',
-        `Slot ${activeSlot + 1} expects a ${expected}. This item is a ${item.category}.`
-      );
-      return;
-    }
-    // Avoid duplicates
-    if (grid.includes(item.id)) {
-      Alert.alert('Already placed', 'This item is already in the grid.');
-      return;
-    }
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-    const next = [...grid];
-    next[activeSlot] = item.id;
-    setGrid(next);
-    setActiveSlot(null);
-    saveGrid(next);
-  };
-
   const saveGrid = async (g: (string | null)[]) => {
     if (!trip) return;
     setSaving(true);
@@ -101,6 +72,51 @@ export default function GridScreen() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const onSlotTap = (slot: number) => {
+    if (grid[slot]) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      const next = [...grid];
+      next[slot] = null;
+      setGrid(next);
+      saveGrid(next);
+    }
+  };
+
+  // Drop handler: called from worklet via runOnJS
+  const handleDrop = (itemId: string, absX: number, absY: number) => {
+    const rects = slotRects.current;
+    let target: number | null = null;
+    for (let s = 0; s < 9; s++) {
+      const r = rects[s];
+      if (!r) continue;
+      if (absX >= r.x && absX <= r.x + r.w && absY >= r.y && absY <= r.y + r.h) {
+        target = s;
+        break;
+      }
+    }
+    if (target == null) return;
+
+    const item = itemsById[itemId];
+    if (!item) return;
+    const expected = categoryForSlot(target);
+    if (item.category !== expected) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+      Alert.alert(
+        'Wrong category',
+        `Slot ${target + 1} expects a ${expected}. This item is a ${item.category}.`
+      );
+      return;
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    const next = [...grid];
+    // remove if already in grid (move semantics)
+    const existing = next.indexOf(itemId);
+    if (existing >= 0) next[existing] = null;
+    next[target] = itemId;
+    setGrid(next);
+    saveGrid(next);
   };
 
   const onGenerate = () => {
@@ -115,13 +131,6 @@ export default function GridScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     router.push('/(tabs)/lookbook');
   };
-
-  // Items available for active slot
-  const availableForSlot = useMemo(() => {
-    if (activeSlot == null) return wardrobe;
-    const expected = categoryForSlot(activeSlot);
-    return wardrobe.filter((w) => w.category === expected && !grid.includes(w.id));
-  }, [wardrobe, grid, activeSlot]);
 
   if (!trip) {
     return (
@@ -141,7 +150,7 @@ export default function GridScreen() {
         <View style={styles.headerRow}>
           <View>
             <Text style={[styles.kicker, { color: c.accent }]}>THE GRID</Text>
-            <Text style={[styles.h1, { color: c.textPrimary }]}>Build your 3×3</Text>
+            <Text style={[styles.h1, { color: c.textPrimary }]}>Drag to build</Text>
           </View>
           {saving && <ActivityIndicator color={c.accent} />}
         </View>
@@ -163,20 +172,31 @@ export default function GridScreen() {
           {Array.from({ length: 9 }, (_, i) => i).map((i) => {
             const id = grid[i];
             const item = id ? itemsById[id] : null;
-            const isActive = activeSlot === i;
             const conflict = conflicts.slotConflicts[i];
             return (
               <Pressable
                 testID={`grid-slot-${i}`}
                 key={i}
-                onPress={() => onSlotPress(i)}
+                onPress={() => onSlotTap(i)}
+                onLayout={(e) => {
+                  // Measure absolute position
+                  const target = e.target as any;
+                  if (target?.measure) {
+                    target.measure(
+                      (_x: number, _y: number, w: number, h: number, px: number, py: number) => {
+                        slotRects.current[i] = { x: px, y: py, w, h };
+                      }
+                    );
+                  } else {
+                    const { x, y, width, height } = e.nativeEvent.layout;
+                    slotRects.current[i] = { x, y, w: width, h: height };
+                  }
+                }}
                 style={[
                   styles.slot,
                   {
                     borderColor: conflict
                       ? c.warning
-                      : isActive
-                      ? c.accent
                       : item
                       ? c.accent
                       : c.borderSubtle,
@@ -202,9 +222,7 @@ export default function GridScreen() {
                   )
                 ) : (
                   <View style={{ alignItems: 'center' }}>
-                    <Text style={[styles.slotIdx, { color: isActive ? c.accent : c.textTertiary }]}>
-                      {i + 1}
-                    </Text>
+                    <Text style={[styles.slotIdx, { color: c.textTertiary }]}>{i + 1}</Text>
                     <Text style={[styles.slotCat, { color: c.textTertiary }]}>
                       {categoryForSlot(i).toUpperCase()}
                     </Text>
@@ -225,10 +243,9 @@ export default function GridScreen() {
         )}
 
         <View style={{ height: 16 }} />
-        <Text style={[styles.section, { color: c.textPrimary }]}>
-          {activeSlot != null
-            ? `PICK A ${categoryForSlot(activeSlot).toUpperCase()} FOR SLOT ${activeSlot + 1}`
-            : 'WARDROBE'}
+        <Text style={[styles.section, { color: c.textPrimary }]}>WARDROBE · DRAG TO GRID</Text>
+        <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 4 }}>
+          Long-press an item, then drag it onto a matching slot. Tap a filled slot to remove.
         </Text>
 
         <ScrollView
@@ -237,45 +254,21 @@ export default function GridScreen() {
           contentContainerStyle={{ paddingRight: 24, gap: 10 }}
           style={{ marginHorizontal: -24, paddingHorizontal: 24, marginTop: 12 }}
         >
-          {availableForSlot.length === 0 && (
+          {wardrobe.length === 0 && (
             <View style={[styles.itemEmpty, { borderColor: c.borderSubtle }]}>
               <Text style={{ color: c.textTertiary, fontSize: 12, textAlign: 'center' }}>
-                {activeSlot != null
-                  ? `No more ${categoryForSlot(activeSlot)}s. Add some in Studio.`
-                  : 'Add items in Studio.'}
+                Add items in Studio first.
               </Text>
             </View>
           )}
-          {availableForSlot.map((it) => {
-            const inGrid = grid.includes(it.id);
-            return (
-              <Pressable
-                testID={`drawer-item-${it.id}`}
-                key={it.id}
-                onPress={() => onItemPress(it)}
-                style={[
-                  styles.drawerItem,
-                  {
-                    borderColor: inGrid ? c.borderSubtle : c.borderActive,
-                    opacity: inGrid ? 0.4 : 1,
-                    backgroundColor: c.surface,
-                  },
-                ]}
-              >
-                {it.image ? (
-                  <Image source={{ uri: it.image }} style={styles.drawerImg} />
-                ) : (
-                  <Ionicons name="shirt-outline" size={24} color={c.textPrimary} />
-                )}
-                <Text numberOfLines={1} style={{ color: c.textPrimary, fontSize: 11, marginTop: 4 }}>
-                  {it.name}
-                </Text>
-                <Text style={{ color: c.textTertiary, fontSize: 9, letterSpacing: 1 }}>
-                  {it.category.toUpperCase()}
-                </Text>
-              </Pressable>
-            );
-          })}
+          {wardrobe.map((it) => (
+            <DraggableItem
+              key={it.id}
+              item={it}
+              inGrid={grid.includes(it.id)}
+              onDrop={(absX, absY) => handleDrop(it.id, absX, absY)}
+            />
+          ))}
         </ScrollView>
 
         <View style={{ height: 24 }} />
@@ -301,12 +294,96 @@ export default function GridScreen() {
             {complete ? 'GENERATE 27 OUTFITS' : `GRID ${filled}/9`}
           </Text>
         </Pressable>
-
-        <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 16, textAlign: 'center' }}>
-          Tap a slot, then tap a wardrobe item. Tap a filled slot to remove.
-        </Text>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function DraggableItem({
+  item,
+  inGrid,
+  onDrop,
+}: {
+  item: WardrobeItem;
+  inGrid: boolean;
+  onDrop: (absX: number, absY: number) => void;
+}) {
+  const { c } = useTheme();
+  const tx = useSharedValue(0);
+  const ty = useSharedValue(0);
+  const dragging = useSharedValue(0);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const triggerHaptic = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+
+  const pan = Gesture.Pan()
+    .activateAfterLongPress(220)
+    .onStart(() => {
+      dragging.value = 1;
+      runOnJS(setIsDragging)(true);
+      runOnJS(triggerHaptic)();
+    })
+    .onUpdate((e) => {
+      tx.value = e.translationX;
+      ty.value = e.translationY;
+    })
+    .onEnd((e) => {
+      runOnJS(onDrop)(e.absoluteX, e.absoluteY);
+      tx.value = withSpring(0);
+      ty.value = withSpring(0);
+      dragging.value = 0;
+      runOnJS(setIsDragging)(false);
+    })
+    .onFinalize(() => {
+      tx.value = withSpring(0);
+      ty.value = withSpring(0);
+      dragging.value = 0;
+      runOnJS(setIsDragging)(false);
+    });
+
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: tx.value },
+      { translateY: ty.value },
+      { scale: 1 + dragging.value * 0.1 },
+    ],
+    zIndex: dragging.value ? 999 : 1,
+    elevation: dragging.value ? 12 : 0,
+  }));
+
+  return (
+    <GestureDetector gesture={pan}>
+      <Animated.View
+        testID={`drag-item-${item.id}`}
+        style={[
+          {
+            width: 90,
+            height: 110,
+            borderWidth: 1,
+            borderRadius: 6,
+            padding: 8,
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderColor: isDragging ? c.accent : inGrid ? c.borderSubtle : c.borderActive,
+            backgroundColor: c.surface,
+            opacity: inGrid && !isDragging ? 0.4 : 1,
+          },
+          animStyle,
+        ]}
+      >
+        {item.image ? (
+          <Image source={{ uri: item.image }} style={{ width: 56, height: 56, borderRadius: 4 }} />
+        ) : (
+          <Ionicons name="shirt-outline" size={24} color={c.textPrimary} />
+        )}
+        <Text numberOfLines={1} style={{ color: c.textPrimary, fontSize: 11, marginTop: 4 }}>
+          {item.name}
+        </Text>
+        <Text style={{ color: c.textTertiary, fontSize: 9, letterSpacing: 1 }}>
+          {item.category.toUpperCase()}
+        </Text>
+      </Animated.View>
+    </GestureDetector>
   );
 }
 
@@ -332,11 +409,6 @@ const styles = StyleSheet.create({
     padding: 10, marginTop: 12,
   },
   section: { fontSize: 11, letterSpacing: 2, fontWeight: '600', marginTop: 16 },
-  drawerItem: {
-    width: 90, height: 110, borderWidth: 1, borderRadius: 6,
-    padding: 8, alignItems: 'center', justifyContent: 'center',
-  },
-  drawerImg: { width: 56, height: 56, borderRadius: 4 },
   itemEmpty: {
     width: 240, height: 110, borderWidth: 1, borderRadius: 6,
     alignItems: 'center', justifyContent: 'center', borderStyle: 'dashed', padding: 16,
