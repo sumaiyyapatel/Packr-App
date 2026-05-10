@@ -184,6 +184,16 @@ async def login(payload: UserLogin):
 
 @api_router.get("/auth/me", response_model=UserPublic)
 async def me(user: dict = Depends(get_current_user)):
+    # Ensure default airline profiles are present (idempotent legacy backfill)
+    profiles = user.get('airline_profiles') or []
+    have_ids = {p.get('id') for p in profiles}
+    needs = [p for p in DEFAULT_AIRLINES if p['id'] not in have_ids]
+    if needs:
+        await db.users.update_one(
+            {'id': user['id']},
+            {'$push': {'airline_profiles': {'$each': needs, '$position': 0}}}
+        )
+        user = await db.users.find_one({'id': user['id']}, {'_id': 0})
     return user_public(user)
 
 # ========== WARDROBE ROUTES ==========
@@ -685,6 +695,14 @@ DEFAULT_TEMPLATES = [
 @app.on_event("startup")
 async def seed_templates():
     try:
+        # Unique compound index for per-user like idempotency (DB-level guard).
+        try:
+            await db.template_likes.create_index(
+                [('template_id', 1), ('user_id', 1)], unique=True, name='uniq_user_template'
+            )
+        except Exception as ie:
+            logger.info(f'template_likes index ensure: {ie}')
+
         existing = await db.templates.count_documents({'is_official': True})
         if existing >= len(DEFAULT_TEMPLATES):
             return

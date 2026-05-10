@@ -4,43 +4,40 @@
 Mobile app (React Native + Expo + TypeScript) that helps travellers pack smarter using the **Sudoku method**: 9 garments (3 tops, 3 bottoms, 3 layers) arranged in a 3×3 grid generate **27 unique outfit combinations** with an efficiency ratio of 3.0.
 
 ## Stack
-- **Frontend**: Expo Router, TypeScript, Zustand (store), AsyncStorage (token + onboarding flag), expo-image-picker (photos), expo-haptics (grid snap), @expo/vector-icons (Ionicons), react-native-safe-area-context, react-native-gesture-handler
-- **Backend**: FastAPI + Motor (MongoDB), JWT (PyJWT) + bcrypt auth
-- **Weather**: Open-Meteo (free, no API key) — `/api/geocode` for city search + `/api/weather` for 14-day forecast
+- **Frontend**: Expo Router, TypeScript, Zustand (store), AsyncStorage, expo-image-picker, expo-haptics, react-native-gesture-handler + react-native-reanimated (drag-and-drop), @expo/vector-icons
+- **Backend**: FastAPI + Motor (MongoDB), JWT (PyJWT) + bcrypt auth, Pillow (palette + DOS guard)
+- **Weather**: Open-Meteo (free, no API key)
+
+## Tiers
+- **Free**: Up to 2 trips, full Sudoku grid + 27 outfits + Lookbook + Pack, browse community templates, 1 hardcoded carry-on profile.
+- **Pro (₹199/mo or ₹1499/yr)**: Unlimited trips, publish community templates, custom airline weight profiles, Phase-2 AI conflict suggestions and on-device Gemini Nano cutouts.
 
 ## Screens
-1. **Auth** — Login + Register (email/password, JWT token persisted in AsyncStorage)
-2. **Onboarding · Method explainer** — "9 items. 27 outfits." with mini grid + stats
-3. **Onboarding · Trip create** — Destination autocomplete (geocode), start/end dates
-4. **Tab · Home (Dashboard)** — Trip cards (countdown, weather, packing progress), stats (outfits/items/efficiency ratio), wardrobe summary, **climate-fit banner** (warns when grid tags conflict with destination weather), theme toggle, logout, **Templates** entry
-5. **Tab · Studio** — Wardrobe library, add items via camera/library, category Top/Bottom/Layer, weight, tags, **server-extracted color palette via Pillow** (`/api/palette`)
-6. **Tab · Grid** — 3×3 builder with **real drag-and-drop** (long-press + Pan gesture via react-native-gesture-handler + reanimated). Drop on matching-category slot fills it; wrong-category drop rejects with alert. Tap filled slot to remove. Conflict checker. "Generate 27 Outfits" enabled only when 9/9 valid
-7. **Tab · Lookbook** — 27 outfit cards (top/bottom/layer + occasion tag), heart favorites, occasion editor, filter chips (All/Favorites/Casual/Formal/Travel/Active/Modest)
-8. **Tab · Pack (Checklist)** — Grid items + essentials with checkboxes & weights. Sticky weight bar showing kg vs 7kg carry-on limit (warning when over). Add custom essentials.
-9. **Stack · Templates** — Browse 4 official community templates (Tokyo Autumn, Lisbon Coastal, Reykjavík Subzero, Bali Tropical). Detail view shows description + 9-item recipe + Like + Apply. Apply clones 9 items into your wardrobe and writes the trip grid.
+1. **Auth** — Login + Register (JWT in AsyncStorage)
+2. **Onboarding · Method explainer** — "9 items. 27 outfits."
+3. **Onboarding · Trip create** — Open-Meteo geocode autocomplete + dates. Free-tier 402 surfaced inline.
+4. **Tab · Home (Dashboard)** — Trips, weather, climate-fit banner, stats, wardrobe summary, **PRO badge / GO PRO** button, theme toggle, Templates entry
+5. **Tab · Studio** — Wardrobe library; photo-based palette extraction (Pillow median-cut)
+6. **Tab · Grid** — Real long-press + drag-and-drop (gesture-handler + reanimated). Drop on matching-category slot fills it. Conflict checker.
+7. **Tab · Lookbook** — 27 outfit cards, favorite + occasion tags, filter chips
+8. **Tab · Pack (Checklist)** — **Airline weight-profile picker** drives carry-on threshold. Grid items + essentials + extras with weight totals.
+9. **Stack · Templates** — Browse 4 official community templates, like (idempotent per user), apply (cleans up prior `from-template` clones).
+10. **Stack · Pro** — Tier comparison, demo upgrade/downgrade (no real billing), airline profile manager.
 
 ## API surface (all under `/api`)
-- Auth: `POST /auth/register`, `POST /auth/login`, `GET /auth/me`
-- Wardrobe: `GET /wardrobe`, `POST /wardrobe`, `DELETE /wardrobe/{id}` (also nulls grid slots)
-- Trips: `GET /trips`, `POST /trips`, `GET /trips/{id}`, `DELETE /trips/{id}`, `PUT /trips/{id}/grid`, `PUT /trips/{id}/favorite`, `PUT /trips/{id}/occasion`, `PUT /trips/{id}/checklist`, `POST /trips/{id}/extras`, `DELETE /trips/{id}/extras/{eid}`
-- Open-Meteo proxy: `GET /geocode?q=`, `GET /weather?latitude=&longitude=`
-
-## Sudoku math
-- Grid layout: column 0 = TOP, column 1 = BOTTOM, column 2 = LAYER (3 of each by row)
-- Outfit = (top_i, bottom_j, layer_k) for i,j,k ∈ {0,1,2} → 3³ = 27 unique outfits
-
-## Design system (Linear Look + Teenage Engineering)
-- True black `#000` dark default; `#FFF` light mode
-- Sage green accent `#8DA399` (dark) / `#6A8276` (light)
-- Inter/system sans-serif; mono for numerics
-- 8pt grid spacing, 1px borders, 4-8px radius, glassmorphism backdrops on modals
-- Haptic snap on grid fill, selection feedback on slot focus, success haptic on outfit generation
+- Auth: `POST /auth/register`, `POST /auth/login`, `GET /auth/me` (auto-backfills default airline profiles)
+- Wardrobe: `GET/POST /wardrobe`, `DELETE /wardrobe/{id}`
+- Trips: `GET/POST /trips` (free cap 2), `GET/DELETE /trips/{id}`, `PUT /trips/{id}/grid|favorite|occasion|checklist`, `POST/DELETE /trips/{id}/extras`
+- Open-Meteo proxy: `GET /geocode`, `GET /weather`
+- Color palette: `POST /palette` — Pillow + 4 MB / 24 MP guard (decompression-bomb safe)
+- Templates: `GET /templates`, `GET /templates/{id}`, `POST /templates` (Pro only), `POST /templates/{id}/like`, `DELETE /templates/{id}/like` (per-user idempotent via unique compound index `(template_id, user_id)`), `POST /templates/{id}/apply` (cleans up prior from-template clones)
+- Pro / Me: `POST/DELETE /me/pro`, `POST /me/airlines` (Pro only), `DELETE /me/airlines/{id}`
 
 ## Test credentials
-See `/app/memory/test_credentials.md` (test@packr.app / test1234)
+See `/app/memory/test_credentials.md` (test@packr.app / test1234, currently is_pro=true).
 
-## Future (Phase 2)
-- AI background removal (Gemini Nano Banana, paid via user's own LLM key — commission model)
-- Per-user like idempotency on templates
-- Wardrobe cleanup of previous from-template clones on re-apply
-- Image-size guard on /api/palette (decompression-bomb protection)
+## Future
+- AI background removal: Remove.bg free tier (50/mo) or Gemini Nano on-device for Pro
+- Stripe / Razorpay billing wiring for /me/pro
+- AI-powered grid conflict suggestions
+- Server.py code-split into routers/ as it grows past ~700 lines
