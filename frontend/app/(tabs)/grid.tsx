@@ -169,68 +169,72 @@ export default function GridScreen() {
 
         {/* 3x3 Grid */}
         <View style={[styles.grid, { borderColor: c.borderSubtle }]}>
-          {Array.from({ length: 9 }, (_, i) => i).map((i) => {
-            const id = grid[i];
-            const item = id ? itemsById[id] : null;
-            const conflict = conflicts.slotConflicts[i];
-            return (
-              <Pressable
-                testID={`grid-slot-${i}`}
-                key={i}
-                onPress={() => onSlotTap(i)}
-                onLayout={(e) => {
-                  // Measure absolute position
-                  const target = e.target as any;
-                  if (target?.measure) {
-                    target.measure(
-                      (_x: number, _y: number, w: number, h: number, px: number, py: number) => {
-                        slotRects.current[i] = { x: px, y: py, w, h };
+          {[0, 1, 2].map((row) => (
+            <View key={row} style={styles.gridRow}>
+              {[0, 1, 2].map((col) => {
+                const i = row * 3 + col;
+                const id = grid[i];
+                const item = id ? itemsById[id] : null;
+                const conflict = conflicts.slotConflicts[i];
+                return (
+                  <Pressable
+                    testID={`grid-slot-${i}`}
+                    key={i}
+                    onPress={() => onSlotTap(i)}
+                    onLayout={(e) => {
+                      const target = e.target as any;
+                      if (target?.measure) {
+                        target.measure(
+                          (_x: number, _y: number, w: number, h: number, px: number, py: number) => {
+                            slotRects.current[i] = { x: px, y: py, w, h };
+                          }
+                        );
+                      } else {
+                        const { x, y, width, height } = e.nativeEvent.layout;
+                        slotRects.current[i] = { x, y, w: width, h: height };
                       }
-                    );
-                  } else {
-                    const { x, y, width, height } = e.nativeEvent.layout;
-                    slotRects.current[i] = { x, y, w: width, h: height };
-                  }
-                }}
-                style={[
-                  styles.slot,
-                  {
-                    borderColor: conflict
-                      ? c.warning
-                      : item
-                      ? c.accent
-                      : c.borderSubtle,
-                    backgroundColor: conflict
-                      ? c.warning + '22'
-                      : item
-                      ? c.elevated
-                      : c.surface,
-                    borderStyle: item ? 'solid' : 'dashed',
-                  },
-                ]}
-              >
-                {item ? (
-                  item.image ? (
-                    <Image source={{ uri: item.image }} style={styles.slotImg} />
-                  ) : (
-                    <View style={{ alignItems: 'center', padding: 4 }}>
-                      <Ionicons name="shirt-outline" size={20} color={c.textPrimary} />
-                      <Text numberOfLines={1} style={{ color: c.textPrimary, fontSize: 10, marginTop: 2 }}>
-                        {item.name}
-                      </Text>
-                    </View>
-                  )
-                ) : (
-                  <View style={{ alignItems: 'center' }}>
-                    <Text style={[styles.slotIdx, { color: c.textTertiary }]}>{i + 1}</Text>
-                    <Text style={[styles.slotCat, { color: c.textTertiary }]}>
-                      {categoryForSlot(i).toUpperCase()}
-                    </Text>
-                  </View>
-                )}
-              </Pressable>
-            );
-          })}
+                    }}
+                    style={[
+                      styles.slot,
+                      {
+                        borderColor: conflict
+                          ? c.warning
+                          : item
+                          ? c.accent
+                          : c.borderSubtle,
+                        backgroundColor: conflict
+                          ? c.warning + '22'
+                          : item
+                          ? c.elevated
+                          : c.surface,
+                        borderStyle: item ? 'solid' : 'dashed',
+                      },
+                    ]}
+                  >
+                    {item ? (
+                      item.image ? (
+                        <Image source={{ uri: item.image }} style={styles.slotImg} />
+                      ) : (
+                        <View style={{ alignItems: 'center', padding: 4 }}>
+                          <Ionicons name="shirt-outline" size={20} color={c.textPrimary} />
+                          <Text numberOfLines={1} style={{ color: c.textPrimary, fontSize: 10, marginTop: 2 }}>
+                            {item.name}
+                          </Text>
+                        </View>
+                      )
+                    ) : (
+                      <View style={{ alignItems: 'center' }}>
+                        <Text style={[styles.slotIdx, { color: c.textTertiary }]}>{i + 1}</Text>
+                        <Text style={[styles.slotCat, { color: c.textTertiary }]}>
+                          {categoryForSlot(i).toUpperCase()}
+                        </Text>
+                      </View>
+                    )}
+                  </Pressable>
+                );
+              })}
+            </View>
+          ))}
         </View>
 
         {conflicts.hasConflicts && (
@@ -395,10 +399,11 @@ const styles = StyleSheet.create({
   colLabel: { fontSize: 10, letterSpacing: 2, fontWeight: '600', flex: 1, textAlign: 'center' },
   grid: {
     aspectRatio: 1, borderWidth: 1, borderRadius: 8, padding: 8,
-    flexDirection: 'row', flexWrap: 'wrap', gap: 8,
+    flexDirection: 'column', gap: 8,
   },
+  gridRow: { flex: 1, flexDirection: 'row', gap: 8 },
   slot: {
-    width: '32%', aspectRatio: 1, borderWidth: 1, borderRadius: 6,
+    flex: 1, borderWidth: 1, borderRadius: 6,
     alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
   },
   slotImg: { width: '100%', height: '100%' },

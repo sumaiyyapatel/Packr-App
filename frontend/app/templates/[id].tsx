@@ -7,6 +7,7 @@ import {
   Pressable,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -43,29 +44,33 @@ export default function TemplateDetail() {
       Alert.alert('No trip', 'Create a trip first.');
       return;
     }
-    Alert.alert(
-      'Apply template?',
-      `This will add 9 placeholder items to your wardrobe and overwrite the grid for "${trip.destination}".`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Apply',
-          onPress: async () => {
-            setApplying(true);
-            try {
-              await api.post(`/templates/${id}/apply`, { trip_id: trip.id });
-              await refreshAll();
-              Alert.alert('Applied', 'Template loaded into your grid.');
-              router.replace('/(tabs)/grid');
-            } catch (e: any) {
-              Alert.alert('Failed', e?.response?.data?.detail || 'Could not apply template');
-            } finally {
-              setApplying(false);
-            }
-          },
-        },
-      ]
-    );
+    const doApply = async () => {
+      setApplying(true);
+      try {
+        await api.post(`/templates/${id}/apply`, { trip_id: trip.id });
+        await refreshAll();
+        if (Platform.OS !== 'web') Alert.alert('Applied', 'Template loaded into your grid.');
+        router.replace('/(tabs)/grid');
+      } catch (e: any) {
+        Alert.alert('Failed', e?.response?.data?.detail || 'Could not apply template');
+      } finally {
+        setApplying(false);
+      }
+    };
+
+    const message = `This will add 9 placeholder items to your wardrobe and overwrite the grid for "${trip.destination}".`;
+    if (Platform.OS === 'web') {
+      // RN-Web ignores multi-button Alert.alert — use native window.confirm.
+      // eslint-disable-next-line no-alert
+      if (typeof window !== 'undefined' && window.confirm(`Apply template?\n${message}`)) {
+        await doApply();
+      }
+      return;
+    }
+    Alert.alert('Apply template?', message, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Apply', onPress: doApply },
+    ]);
   };
 
   const onLike = async () => {
