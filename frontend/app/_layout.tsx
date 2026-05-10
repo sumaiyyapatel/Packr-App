@@ -44,7 +44,7 @@ function RootGate() {
       if (segments[0] !== 'onboarding') router.replace('/onboarding/trip-create');
       return;
     }
-    if (!inTabs && !inTemplates) router.replace('/(tabs)');
+    if (!inTabs && !inTemplates && segments[0] !== 'pro') router.replace('/(tabs)');
   }, [hydrated, user, onboarded, trips.length, segments, router]);
 
   if (!hydrated || !fontsLoaded) {
@@ -63,6 +63,7 @@ function RootGate() {
         <Stack.Screen name="onboarding" />
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="templates" />
+        <Stack.Screen name="pro" options={{ presentation: 'modal' }} />
       </Stack>
     </>
   );

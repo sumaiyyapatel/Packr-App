@@ -19,7 +19,14 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-export type User = { id: string; email: string; name?: string | null; created_at: string };
+export type User = {
+  id: string;
+  email: string;
+  name?: string | null;
+  is_pro: boolean;
+  airline_profiles: { id: string; name: string; max_kg: number }[];
+  created_at: string;
+};
 export type WardrobeItem = {
   id: string;
   user_id: string;

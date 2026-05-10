@@ -46,6 +46,8 @@ class UserPublic(BaseModel):
     id: str
     email: str
     name: Optional[str] = None
+    is_pro: bool = False
+    airline_profiles: List[Dict[str, Any]] = []
     created_at: datetime
 
 class TokenResponse(BaseModel):
@@ -141,7 +143,19 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
     return user
 
 def user_public(u: dict) -> UserPublic:
-    return UserPublic(id=u['id'], email=u['email'], name=u.get('name'), created_at=u['created_at'])
+    return UserPublic(
+        id=u['id'],
+        email=u['email'],
+        name=u.get('name'),
+        is_pro=bool(u.get('is_pro', False)),
+        airline_profiles=u.get('airline_profiles') or DEFAULT_AIRLINES,
+        created_at=u['created_at'],
+    )
+
+DEFAULT_AIRLINES: List[Dict[str, Any]] = [
+    {'id': 'carry-on', 'name': 'Generic Carry-on', 'max_kg': 7.0},
+    {'id': 'iata', 'name': 'IATA Standard', 'max_kg': 7.0},
+]
 
 # ========== AUTH ROUTES ==========
 @api_router.post("/auth/register", response_model=TokenResponse)
@@ -154,6 +168,8 @@ async def register(payload: UserRegister):
         'email': payload.email.lower(),
         'password_hash': hash_password(payload.password),
         'name': payload.name,
+        'is_pro': False,
+        'airline_profiles': DEFAULT_AIRLINES,
         'created_at': datetime.now(timezone.utc),
     }
     await db.users.insert_one(user_doc.copy())
@@ -204,6 +220,13 @@ async def list_trips(user: dict = Depends(get_current_user)):
 
 @api_router.post("/trips", response_model=Trip)
 async def create_trip(payload: TripCreate, user: dict = Depends(get_current_user)):
+    if not user.get('is_pro', False):
+        existing = await db.trips.count_documents({'user_id': user['id']})
+        if existing >= FREE_TRIP_CAP:
+            raise HTTPException(
+                402,
+                f'Free tier is capped at {FREE_TRIP_CAP} trips. Upgrade to Packr Pro for unlimited.'
+            )
     trip = Trip(user_id=user['id'], **payload.dict())
     await db.trips.insert_one(trip.dict())
     return trip
@@ -341,24 +364,32 @@ async def root():
 class PaletteRequest(BaseModel):
     image: str  # data:image/jpeg;base64,... or raw base64
 
+FREE_TRIP_CAP = 2
+MAX_IMAGE_BYTES = 4 * 1024 * 1024  # 4 MB decoded
+Image.MAX_IMAGE_PIXELS = 24_000_000  # ~24 megapixels max — Pillow decompression-bomb guard
+
 @api_router.post("/palette")
 async def extract_palette(payload: PaletteRequest, user: dict = Depends(get_current_user)):
     raw = payload.image
     if ',' in raw and raw.startswith('data:'):
         raw = raw.split(',', 1)[1]
+    if len(raw) > 8 * 1024 * 1024:  # ~8MB base64 → ~6MB binary
+        raise HTTPException(413, 'Image too large (max ~6 MB)')
     try:
-        data = base64.b64decode(raw)
-        img = Image.open(io.BytesIO(data)).convert('RGB')
-        # downsize for speed
+        data = base64.b64decode(raw, validate=False)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise HTTPException(413, f'Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)')
+        img = Image.open(io.BytesIO(data))
+        # Light decode without loading huge images at full resolution
+        img.draft('RGB', (256, 256))
+        img = img.convert('RGB')
         img.thumbnail((128, 128))
-        # quantize to 6 colors and pick top 3 by frequency, skipping near-white/near-black background
         q = img.quantize(colors=6, method=Image.Quantize.MEDIANCUT)
         palette = q.getpalette() or []
-        counts = sorted(q.getcolors() or [], reverse=True)  # [(count, idx), ...]
+        counts = sorted(q.getcolors() or [], reverse=True)
         hexes: List[str] = []
         for cnt, idx in counts:
             r, g, b = palette[idx * 3], palette[idx * 3 + 1], palette[idx * 3 + 2]
-            # skip very near white or very near black so we keep garment color
             if r > 240 and g > 240 and b > 240:
                 continue
             if r < 15 and g < 15 and b < 15:
@@ -369,6 +400,10 @@ async def extract_palette(payload: PaletteRequest, user: dict = Depends(get_curr
         if not hexes:
             hexes = ['#888888']
         return {'colors': hexes}
+    except HTTPException:
+        raise
+    except Image.DecompressionBombError:
+        raise HTTPException(413, 'Image is too large to process safely')
     except Exception as e:
         raise HTTPException(400, f'Could not parse image: {e}')
 
@@ -411,6 +446,11 @@ async def get_template(tid: str):
 
 @api_router.post("/templates", response_model=Template)
 async def publish_template(payload: TemplateCreate, user: dict = Depends(get_current_user)):
+    if not user.get('is_pro', False):
+        raise HTTPException(
+            402,
+            'Publishing community templates is a Packr Pro feature. Upgrade to share your grids.'
+        )
     if len(payload.items) != 9:
         raise HTTPException(400, 'Template must include exactly 9 items')
     tpl = Template(
@@ -424,25 +464,62 @@ async def publish_template(payload: TemplateCreate, user: dict = Depends(get_cur
 
 @api_router.post("/templates/{tid}/like", response_model=Template)
 async def like_template(tid: str, user: dict = Depends(get_current_user)):
-    await db.templates.update_one({'id': tid}, {'$inc': {'likes': 1}})
-    doc = await db.templates.find_one({'id': tid}, {'_id': 0})
-    if not doc:
+    # Idempotent per user
+    tpl = await db.templates.find_one({'id': tid}, {'_id': 0})
+    if not tpl:
         raise HTTPException(404, 'Template not found')
-    return Template(**doc)
+    existing = await db.template_likes.find_one({'template_id': tid, 'user_id': user['id']})
+    if not existing:
+        await db.template_likes.insert_one({
+            'template_id': tid,
+            'user_id': user['id'],
+            'created_at': datetime.now(timezone.utc),
+        })
+        await db.templates.update_one({'id': tid}, {'$inc': {'likes': 1}})
+        tpl = await db.templates.find_one({'id': tid}, {'_id': 0})
+    return Template(**tpl)
+
+@api_router.delete("/templates/{tid}/like", response_model=Template)
+async def unlike_template(tid: str, user: dict = Depends(get_current_user)):
+    res = await db.template_likes.delete_one({'template_id': tid, 'user_id': user['id']})
+    if res.deleted_count:
+        await db.templates.update_one({'id': tid}, {'$inc': {'likes': -1}})
+    tpl = await db.templates.find_one({'id': tid}, {'_id': 0})
+    if not tpl:
+        raise HTTPException(404, 'Template not found')
+    return Template(**tpl)
 
 class ApplyTemplate(BaseModel):
     trip_id: str
 
 @api_router.post("/templates/{tid}/apply", response_model=Trip)
 async def apply_template(tid: str, payload: ApplyTemplate, user: dict = Depends(get_current_user)):
-    """Clone the 9 template items into the user's wardrobe (with a #from-template tag)
-    and assign them to the trip's grid in slot order."""
+    """Clone the 9 template items into the user's wardrobe (with a `from-template` tag)
+    and assign them to the trip's grid in slot order. Re-applying cleans up prior
+    `from-template` clones from THIS trip's previous grid to keep the wardrobe lean."""
     tpl = await db.templates.find_one({'id': tid}, {'_id': 0})
     if not tpl:
         raise HTTPException(404, 'Template not found')
     trip = await db.trips.find_one({'id': payload.trip_id, 'user_id': user['id']}, {'_id': 0})
     if not trip:
         raise HTTPException(404, 'Trip not found')
+
+    # Cleanup: remove from-template wardrobe clones that were referenced by THIS trip's
+    # previous grid AND are no longer used by any other trip.
+    prior_ids = [x for x in (trip.get('grid') or []) if x]
+    if prior_ids:
+        prior_items = await db.wardrobe.find(
+            {'user_id': user['id'], 'id': {'$in': prior_ids}, 'tags': 'from-template'},
+            {'_id': 0}
+        ).to_list(50)
+        for item in prior_items:
+            still_used = await db.trips.count_documents({
+                'user_id': user['id'],
+                'id': {'$ne': payload.trip_id},
+                'grid': item['id'],
+            })
+            if not still_used:
+                await db.wardrobe.delete_one({'id': item['id'], 'user_id': user['id']})
 
     new_grid: List[Optional[str]] = [None] * 9
     for slot, raw in enumerate(tpl.get('items', [])[:9]):
@@ -467,6 +544,51 @@ async def apply_template(tid: str, payload: ApplyTemplate, user: dict = Depends(
     )
     trip = await db.trips.find_one({'id': payload.trip_id, 'user_id': user['id']}, {'_id': 0})
     return Trip(**trip)
+
+# ========== ME / PRO / AIRLINES ==========
+class AirlineProfile(BaseModel):
+    name: str
+    max_kg: float
+
+@api_router.post("/me/pro", response_model=UserPublic)
+async def upgrade_to_pro(user: dict = Depends(get_current_user)):
+    """Stub upgrade — real billing/payment is Phase 2 (Stripe / Razorpay)."""
+    await db.users.update_one({'id': user['id']}, {'$set': {'is_pro': True}})
+    user = await db.users.find_one({'id': user['id']}, {'_id': 0})
+    return user_public(user)
+
+@api_router.delete("/me/pro", response_model=UserPublic)
+async def downgrade_pro(user: dict = Depends(get_current_user)):
+    await db.users.update_one({'id': user['id']}, {'$set': {'is_pro': False}})
+    user = await db.users.find_one({'id': user['id']}, {'_id': 0})
+    return user_public(user)
+
+@api_router.post("/me/airlines", response_model=UserPublic)
+async def add_airline(payload: AirlineProfile, user: dict = Depends(get_current_user)):
+    if not user.get('is_pro', False):
+        raise HTTPException(402, 'Custom airline profiles are a Packr Pro feature.')
+    # Backfill defaults for legacy users that registered before airline_profiles field existed
+    if not user.get('airline_profiles'):
+        await db.users.update_one(
+            {'id': user['id']},
+            {'$set': {'airline_profiles': list(DEFAULT_AIRLINES)}}
+        )
+    profile = {'id': str(uuid.uuid4()), 'name': payload.name, 'max_kg': payload.max_kg}
+    await db.users.update_one(
+        {'id': user['id']},
+        {'$push': {'airline_profiles': profile}}
+    )
+    user = await db.users.find_one({'id': user['id']}, {'_id': 0})
+    return user_public(user)
+
+@api_router.delete("/me/airlines/{aid}", response_model=UserPublic)
+async def remove_airline(aid: str, user: dict = Depends(get_current_user)):
+    await db.users.update_one(
+        {'id': user['id']},
+        {'$pull': {'airline_profiles': {'id': aid}}}
+    )
+    user = await db.users.find_one({'id': user['id']}, {'_id': 0})
+    return user_public(user)
 
 # ========== Seed default templates (idempotent) ==========
 DEFAULT_TEMPLATES = [

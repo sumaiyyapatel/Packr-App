@@ -141,13 +141,19 @@ class TestTemplatesAuth:
         assert len(tpl["items"]) == 9
 
     def test_like_increments(self, api_url, session, test_user_headers):
-        r = requests.get(f"{api_url}/templates")
-        tid = next(t["id"] for t in r.json() if t.get("is_official"))
-        before = next(t["likes"] for t in r.json() if t["id"] == tid)
-        r = session.post(f"{api_url}/templates/{tid}/like", headers=test_user_headers)
+        # Iteration 4: per-user idempotent. Use a fresh user for a clean +1 assertion.
+        import uuid as _uuid
+        email = f"TEST_likeinc_{_uuid.uuid4().hex[:6]}@packr.app"
+        r0 = session.post(f"{api_url}/auth/register",
+                          json={"email": email, "password": "secret1234", "name": "Likey"})
+        assert r0.status_code == 200
+        h = {"Authorization": f"Bearer {r0.json()['token']}", "Content-Type": "application/json"}
+        templates = requests.get(f"{api_url}/templates").json()
+        tid = next(t["id"] for t in templates if t.get("is_official"))
+        before = next(t["likes"] for t in templates if t["id"] == tid)
+        r = session.post(f"{api_url}/templates/{tid}/like", headers=h)
         assert r.status_code == 200, r.text
-        after = r.json()["likes"]
-        assert after == before + 1
+        assert r.json()["likes"] == before + 1
 
     def test_like_requires_auth(self, api_url):
         r = requests.get(f"{api_url}/templates")

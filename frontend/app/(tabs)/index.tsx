@@ -127,6 +127,28 @@ export default function Dashboard() {
             </Text>
           </View>
           <View style={{ flexDirection: 'row', gap: 12 }}>
+            {user?.is_pro ? (
+              <Pressable
+                testID="pro-badge"
+                onPress={() => router.push('/pro')}
+                style={[styles.proBadge, { borderColor: c.accent, backgroundColor: c.accent + '15' }]}
+              >
+                <Ionicons name="sparkles" size={12} color={c.accent} />
+                <Text style={{ color: c.accent, fontSize: 11, letterSpacing: 1, fontWeight: '700', marginLeft: 4 }}>
+                  PRO
+                </Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                testID="go-pro-button"
+                onPress={() => router.push('/pro')}
+                style={[styles.proBadge, { borderColor: c.borderActive }]}
+              >
+                <Text style={{ color: c.textPrimary, fontSize: 11, letterSpacing: 1, fontWeight: '600' }}>
+                  GO PRO
+                </Text>
+              </Pressable>
+            )}
             <Pressable testID="theme-toggle-button" onPress={toggle} style={[styles.iconBtn, { borderColor: c.borderSubtle }]}>
               <Ionicons name={mode === 'dark' ? 'sunny-outline' : 'moon-outline'} size={18} color={c.textPrimary} />
             </Pressable>
@@ -417,4 +439,8 @@ const styles = StyleSheet.create({
   cta: { borderWidth: 1, borderRadius: 4, padding: 16, alignItems: 'center' },
   ctaText: { fontSize: 13, letterSpacing: 2, fontWeight: '600' },
   climateBox: { borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 12 },
+  proBadge: {
+    flexDirection: 'row', alignItems: 'center',
+    height: 36, paddingHorizontal: 12, borderRadius: 4, borderWidth: 1,
+  },
 });

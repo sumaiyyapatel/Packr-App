@@ -80,7 +80,12 @@ export default function TripCreate() {
       setSelectedTrip(r.data.id);
       router.replace('/(tabs)');
     } catch (e: any) {
-      setErr(e?.response?.data?.detail || 'Failed to create trip');
+      const status = e?.response?.status;
+      if (status === 402) {
+        setErr(e?.response?.data?.detail || 'Free tier capped at 2 trips. Upgrade to Pro.');
+      } else {
+        setErr(e?.response?.data?.detail || 'Failed to create trip');
+      }
     } finally {
       setLoading(false);
     }

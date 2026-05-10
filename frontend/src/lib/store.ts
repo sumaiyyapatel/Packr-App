@@ -10,12 +10,15 @@ type State = {
   trips: Trip[];
   wardrobe: WardrobeItem[];
   selectedTripId: string | null;
+  selectedAirlineId: string | null;
 
   hydrate: () => Promise<void>;
   register: (email: string, password: string, name?: string) => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   finishOnboarding: () => Promise<void>;
+  setUser: (u: User) => void;
+  setSelectedAirline: (id: string | null) => void;
 
   refreshAll: () => Promise<void>;
   refreshTrips: () => Promise<void>;
@@ -36,6 +39,7 @@ export const useStore = create<State>((set, get) => ({
   trips: [],
   wardrobe: [],
   selectedTripId: null,
+  selectedAirlineId: null,
 
   hydrate: async () => {
     const token = await AsyncStorage.getItem(TOKEN_KEY);
@@ -104,6 +108,14 @@ export const useStore = create<State>((set, get) => ({
     if (id) AsyncStorage.setItem('packr.selectedTripId', id);
     else AsyncStorage.removeItem('packr.selectedTripId');
   },
+
+  setSelectedAirline: (id) => {
+    set({ selectedAirlineId: id });
+    if (id) AsyncStorage.setItem('packr.airlineId', id);
+    else AsyncStorage.removeItem('packr.airlineId');
+  },
+
+  setUser: (u) => set({ user: u }),
 
   upsertTrip: (t) => {
     const trips = get().trips.filter((x) => x.id !== t.id);
