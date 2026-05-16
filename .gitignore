@@ -31,6 +31,9 @@ dist/
 dist
 
 # Environment files (comprehensive coverage)
+.env
+.env.*
+!.env.example
 
 *token.json*
 *credentials.json*
@@ -41,6 +44,8 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 dump.rdb
+.codex-logs/
+frontend/.codex-logs/
 
 # System files
 .DS_Store
@@ -49,6 +54,8 @@ dump.rdb
 # Python
 __pycache__/
 *pyc*
+.pytest_cache/
+.ruff_cache/
 venv/
 .venv/
 
@@ -57,12 +64,14 @@ chainlit.md
 .chainlit
 .ipynb_checkpoints/
 .ac
+Packr App/
 
 # Deployment
 .vercel
 
 # Data and databases
 agenthub/agents/youtube/db
+backend/uploads/
 
 # Archive files and large assets
 **/*.zip
@@ -75,8 +84,56 @@ agenthub/agents/youtube/db
 
 # Build caches
 .cache/
+.expo/
+.metro-cache/
 
 memory/test_credentials.md
+memory/
+test_reports/
+test_result.md
+design_guidelines.json
 
 # Mobile development
 android-sdk/
+frontend/android/
+frontend/google-services.json
+backend/google-services.json
+frontend/4.png
+frontend/android/app/build/intermediates/cxx/Debug/1m4s3h4n/obj/arm64-v8a/libreactnative.so
+frontend/android/app/build/intermediates/cxx/Debug/1m4s3h4n/obj/armeabi-v7a/libreactnative.so
+frontend/android/app/build/intermediates/cxx/Debug/1m4s3h4n/obj/x86/libreactnative.so
+frontend/android/app/build/intermediates/cxx/Debug/1m4s3h4n/obj/x86_64/libreactnative.so
+frontend/android/app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libreactnative.so
+frontend/android/app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/armeabi-v7a/libreactnative.so
+frontend/android/app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86/libreactnative.so
+frontend/android/app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libreactnative.so
+frontend/android/app/build/outputs/apk/debug/app-debug.apk
+frontend/node_modules/expo-modules-core/android/build/intermediates/cxx/Debug/6k735645/obj/arm64-v8a/libreactnative.so
+frontend/node_modules/expo-modules-core/android/build/intermediates/cxx/Debug/6k735645/obj/armeabi-v7a/libreactnative.so
+frontend/node_modules/expo-modules-core/android/build/intermediates/cxx/Debug/6k735645/obj/x86/libreactnative.so
+frontend/node_modules/expo-modules-core/android/build/intermediates/cxx/Debug/6k735645/obj/x86_64/libreactnative.so
+frontend/node_modules/react-native-gesture-handler/android/build/intermediates/cxx/Debug/1j1o1p6e/obj/arm64-v8a/libreactnative.so
+frontend/node_modules/react-native-gesture-handler/android/build/intermediates/cxx/Debug/1j1o1p6e/obj/armeabi-v7a/libreactnative.so
+frontend/node_modules/react-native-gesture-handler/android/build/intermediates/cxx/Debug/1j1o1p6e/obj/x86/libreactnative.so
+frontend/node_modules/react-native-gesture-handler/android/build/intermediates/cxx/Debug/1j1o1p6e/obj/x86_64/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/intermediates/cmake/debug/obj/arm64-v8a/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/intermediates/cmake/debug/obj/armeabi-v7a/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/intermediates/cmake/debug/obj/x86/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/intermediates/cmake/debug/obj/x86_64/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/intermediates/cxx/Debug/5r6616w5/obj/arm64-v8a/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/intermediates/cxx/Debug/5r6616w5/obj/armeabi-v7a/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/intermediates/cxx/Debug/5r6616w5/obj/x86/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/intermediates/cxx/Debug/5r6616w5/obj/x86_64/libreactnative.so
+frontend/node_modules/react-native-reanimated/android/build/outputs/aar/react-native-reanimated-debug.aar
+frontend/node_modules/react-native-screens/android/build/intermediates/cxx/Debug/6xv522z6/obj/arm64-v8a/libreactnative.so
+frontend/node_modules/react-native-screens/android/build/intermediates/cxx/Debug/6xv522z6/obj/armeabi-v7a/libreactnative.so
+frontend/node_modules/react-native-screens/android/build/intermediates/cxx/Debug/6xv522z6/obj/x86/libreactnative.so
+frontend/node_modules/react-native-screens/android/build/intermediates/cxx/Debug/6xv522z6/obj/x86_64/libreactnative.so
+frontend/node_modules/react-native-worklets/android/build/intermediates/cmake/debug/obj/arm64-v8a/libreactnative.so
+frontend/node_modules/react-native-worklets/android/build/intermediates/cmake/debug/obj/armeabi-v7a/libreactnative.so
+frontend/node_modules/react-native-worklets/android/build/intermediates/cmake/debug/obj/x86/libreactnative.so
+frontend/node_modules/react-native-worklets/android/build/intermediates/cmake/debug/obj/x86_64/libreactnative.so
+frontend/node_modules/react-native-worklets/android/build/intermediates/cxx/Debug/395q5o6p/obj/arm64-v8a/libreactnative.so
+frontend/node_modules/react-native-worklets/android/build/intermediates/cxx/Debug/395q5o6p/obj/armeabi-v7a/libreactnative.so
+frontend/node_modules/react-native-worklets/android/build/intermediates/cxx/Debug/395q5o6p/obj/x86/libreactnative.so
+frontend/node_modules/react-native-worklets/android/build/intermediates/cxx/Debug/395q5o6p/obj/x86_64/libreactnative.so
