@@ -276,6 +276,69 @@ class FeedbackCreate(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     context: Optional[str] = Field(default=None, max_length=200)
 
+class OutfitSuggestion(BaseModel):
+    outfit_key: str
+    outfit_index: int
+    date: Optional[str] = None
+    occasion: str
+    score: int
+    reason: str
+    item_ids: List[str]
+    item_names: List[str]
+
+class TripStats(BaseModel):
+    packing_score: int
+    items_per_day: float
+    outfit_variety: int
+    most_used_color: Optional[str] = None
+    completed_grid: bool
+    planned_days: int
+    trip_days: int
+    checklist_progress: float
+    total_weight_kg: float
+
+class TripNudge(BaseModel):
+    id: str
+    kind: Literal['pre_trip', 'wardrobe_audit', 'post_trip', 'challenge']
+    trip_id: Optional[str] = None
+    title: str
+    message: str
+    action_route: str
+
+class TripReflectionCreate(BaseModel):
+    worn_outfit_keys: List[str] = Field(default_factory=list)
+    unused_item_ids: List[str] = Field(default_factory=list)
+    notes: str = Field(default='', max_length=1000)
+    rating: Optional[int] = Field(default=None, ge=1, le=5)
+
+class TripReflection(TripReflectionCreate):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    trip_id: str
+    user_id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class CommunityChallenge(BaseModel):
+    id: str
+    month: str
+    title: str
+    prompt: str
+    destination: Optional[str] = None
+    climate: Optional[str] = None
+    posts_count: int = 0
+    votes_count: int = 0
+
+class TripInviteCreate(BaseModel):
+    companion_name: Optional[str] = Field(default=None, max_length=80)
+
+class TripInvite(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    trip_id: str
+    owner_id: str
+    code: str
+    companion_name: Optional[str] = None
+    status: Literal['pending', 'accepted'] = 'pending'
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
 # ========== AUTH HELPERS ==========
 def hash_password(pw: str) -> str:
     return bcrypt.hashpw(pw.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -405,6 +468,180 @@ def valid_outfit_keys(grid: List[Optional[str]]) -> set:
             for layer_slot in LAYER_SLOTS:
                 keys.add('|'.join([grid[top_slot], grid[bottom_slot], grid[layer_slot]]))
     return keys
+
+def grid_outfits(grid: List[Optional[str]]) -> List[Dict[str, Any]]:
+    outfits: List[Dict[str, Any]] = []
+    if len(grid) != 9 or any(not grid[slot] for slot in TOP_SLOTS + BOTTOM_SLOTS + LAYER_SLOTS):
+        return outfits
+    index = 0
+    for top_slot in TOP_SLOTS:
+        for bottom_slot in BOTTOM_SLOTS:
+            for layer_slot in LAYER_SLOTS:
+                ids = [grid[top_slot], grid[bottom_slot], grid[layer_slot]]
+                outfits.append({
+                    'index': index,
+                    'key': '|'.join(ids),
+                    'item_ids': ids,
+                    'slots': [top_slot, bottom_slot, layer_slot],
+                })
+                index += 1
+    return outfits
+
+def trip_date_range(start_date: str, end_date: str) -> List[str]:
+    validate_trip_dates(start_date, end_date)
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    days: List[str] = []
+    current = start
+    while current <= end:
+        days.append(current.isoformat())
+        current += timedelta(days=1)
+    return days
+
+def item_tags(items: List[dict]) -> set:
+    return {
+        str(tag).lower().replace('#', '')
+        for item in items
+        for tag in (item.get('tags') or [])
+    }
+
+def destination_context_tags(trip: dict, day: Optional[str]) -> set:
+    destination = (trip.get('destination') or '').lower()
+    context = set()
+    if any(word in destination for word in ['bali', 'singapore', 'miami', 'phuket', 'dubai', 'beach']):
+        context.update(['tropical', 'beach'])
+    if any(word in destination for word in ['reykjavik', 'iceland', 'alaska', 'ski', 'snow']):
+        context.update(['snow', 'cold'])
+    target_day = day or trip.get('start_date')
+    try:
+        month = date.fromisoformat(target_day).month
+        if month in (12, 1, 2):
+            context.add('cold')
+        if month in (6, 7, 8):
+            context.add('tropical')
+    except Exception:
+        pass
+    return context
+
+def score_outfit(
+    outfit: Dict[str, Any],
+    items_by_id: Dict[str, dict],
+    trip: dict,
+    day: Optional[str],
+    occasion: Optional[str],
+) -> OutfitSuggestion:
+    items = [items_by_id[item_id] for item_id in outfit['item_ids'] if item_id in items_by_id]
+    tags = item_tags(items)
+    target = (occasion or '').lower()
+    context = destination_context_tags(trip, day)
+    score = 55
+    reasons: List[str] = []
+
+    if outfit['key'] in (trip.get('favorites') or []):
+        score += 14
+        reasons.append('favorited')
+    if target:
+        occasion_matches = {
+            'formal': {'formal', 'business', 'modest'},
+            'business': {'formal', 'business'},
+            'travel': {'casual', 'tropical', 'beach', 'modest'},
+            'active': {'gym', 'casual'},
+            'casual': {'casual', 'denim', 'linen'},
+            'modest': {'modest', 'layer', 'linen'},
+        }.get(target, {target})
+        hits = tags.intersection(occasion_matches)
+        if hits:
+            score += min(18, 6 * len(hits))
+            reasons.append(f'{target} tags')
+    climate_hits = tags.intersection(context)
+    if climate_hits:
+        score += min(15, 5 * len(climate_hits))
+        reasons.append('destination fit')
+
+    color_count: Dict[str, int] = {}
+    for item in items:
+        for color in item.get('colors') or []:
+            color_count[color] = color_count.get(color, 0) + 1
+    if any(count > 1 for count in color_count.values()):
+        score += 8
+        reasons.append('color repeat')
+
+    total_weight = sum(float(item.get('weight_kg') or 0) for item in items)
+    if total_weight <= 1.2:
+        score += 5
+        reasons.append('lightweight')
+
+    if not reasons:
+        reasons.append('balanced grid pick')
+    names = [item.get('name', 'Item') for item in items]
+    return OutfitSuggestion(
+        outfit_key=outfit['key'],
+        outfit_index=outfit['index'],
+        date=day,
+        occasion=occasion or 'Any',
+        score=max(0, min(100, score)),
+        reason=', '.join(reasons[:3]),
+        item_ids=outfit['item_ids'],
+        item_names=names,
+    )
+
+ESSENTIAL_KEYS = ['passport', 'wallet', 'phone-charger', 'toothbrush', 'shampoo', 'deodorant']
+
+def compute_trip_stats(trip: dict, wardrobe_by_id: Dict[str, dict]) -> TripStats:
+    grid = trip.get('grid') or []
+    trip_days = days_between(trip.get('start_date'), trip.get('end_date'))
+    grid_ids = [item_id for item_id in grid if item_id and item_id in wardrobe_by_id]
+    completed_grid = len(grid_ids) == 9
+    outfit_variety = 27 if completed_grid else 0
+    planned_days = len(trip.get('outfit_plan') or {})
+    checklist_state = trip.get('checklist_state') or {}
+    extras = trip.get('extras') or []
+    checklist_keys = [f'grid:{item_id}' for item_id in grid_ids] + [f'ess:{key}' for key in ESSENTIAL_KEYS] + [
+        f"ext:{extra.get('id')}" for extra in extras if extra.get('id')
+    ]
+    checked = sum(1 for key in checklist_keys if checklist_state.get(key))
+    checklist_progress = checked / len(checklist_keys) if checklist_keys else 0
+    total_weight = sum(float(wardrobe_by_id[item_id].get('weight_kg') or 0) for item_id in grid_ids)
+    total_weight += sum(float(extra.get('weight_kg') or 0) for extra in extras)
+    color_counts: Dict[str, int] = {}
+    for item_id in grid_ids:
+        for color in wardrobe_by_id[item_id].get('colors') or []:
+            color_counts[color] = color_counts.get(color, 0) + 1
+    most_used_color = max(color_counts, key=color_counts.get) if color_counts else None
+    grid_score = (len(grid_ids) / 9) * 35
+    plan_score = (planned_days / trip_days) * 25 if trip_days else 0
+    checklist_score = checklist_progress * 25
+    weight_score = 15 if total_weight <= 7 else max(0, 15 - ((total_weight - 7) * 5))
+    packing_score = round(min(100, grid_score + plan_score + checklist_score + weight_score))
+    return TripStats(
+        packing_score=packing_score,
+        items_per_day=round(len(grid_ids) / trip_days, 2) if trip_days else 0,
+        outfit_variety=outfit_variety,
+        most_used_color=most_used_color,
+        completed_grid=completed_grid,
+        planned_days=planned_days,
+        trip_days=trip_days,
+        checklist_progress=round(checklist_progress, 2),
+        total_weight_kg=round(total_weight, 2),
+    )
+
+def current_challenge_id() -> str:
+    return datetime.now(timezone.utc).strftime('%Y-%m')
+
+async def build_monthly_challenge() -> CommunityChallenge:
+    month = current_challenge_id()
+    posts_count = await db.community_posts.count_documents({'visibility': 'public'})
+    votes_count = await db.challenge_votes.count_documents({'challenge_id': month})
+    return CommunityChallenge(
+        id=month,
+        month=month,
+        title='Monthly packing challenge',
+        prompt='Pack 5 days with only neutrals. Share one screenshot post and vote for your favorite grids.',
+        destination='Any destination',
+        climate='mild',
+        posts_count=posts_count,
+        votes_count=votes_count,
+    )
 
 def clean_outfit_state_for_grid(trip: dict, grid: List[Optional[str]]) -> Dict[str, Any]:
     valid_keys = valid_outfit_keys(grid)
@@ -849,6 +1086,112 @@ async def update_outfit_plan(trip_id: str, payload: OutfitPlanUpdate, user: dict
     await db.trips.update_one({'id': trip_id, 'user_id': user['id']}, {'$set': {'outfit_plan': plan}})
     trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
     return Trip(**trip)
+
+@api_router.get("/trips/{trip_id}/outfit-suggestions", response_model=List[OutfitSuggestion])
+async def outfit_suggestions(
+    trip_id: str,
+    date: Optional[str] = None,
+    occasion: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    if date:
+        validate_trip_dates(date, date)
+        if date < trip['start_date'] or date > trip['end_date']:
+            raise HTTPException(400, 'date must be within the trip dates')
+    outfits = grid_outfits(trip.get('grid') or [])
+    if not outfits:
+        return []
+    item_ids = list({item_id for outfit in outfits for item_id in outfit['item_ids']})
+    wardrobe = await db.wardrobe.find(
+        {'user_id': user['id'], 'id': {'$in': item_ids}},
+        {'_id': 0},
+    ).to_list(20)
+    by_id = {item['id']: item for item in wardrobe}
+    suggestions = [
+        score_outfit(outfit, by_id, trip, date, occasion)
+        for outfit in outfits
+        if all(item_id in by_id for item_id in outfit['item_ids'])
+    ]
+    suggestions.sort(key=lambda item: (-item.score, item.outfit_index))
+    return suggestions[:5]
+
+@api_router.get("/trips/{trip_id}/stats", response_model=TripStats)
+async def trip_stats(trip_id: str, user: dict = Depends(get_current_user)):
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    grid_ids = [item_id for item_id in (trip.get('grid') or []) if item_id]
+    wardrobe = await db.wardrobe.find(
+        {'user_id': user['id'], 'id': {'$in': grid_ids}},
+        {'_id': 0},
+    ).to_list(20)
+    return compute_trip_stats(trip, {item['id']: item for item in wardrobe})
+
+@api_router.post("/trips/{trip_id}/reflections", response_model=TripReflection)
+async def create_trip_reflection(
+    trip_id: str,
+    payload: TripReflectionCreate,
+    user: dict = Depends(get_current_user),
+):
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    valid_keys = valid_outfit_keys(trip.get('grid') or [])
+    invalid_outfits = [key for key in payload.worn_outfit_keys if valid_keys and key not in valid_keys]
+    if invalid_outfits:
+        raise HTTPException(400, 'worn_outfit_keys must match this trip grid')
+    grid_ids = set(item_id for item_id in (trip.get('grid') or []) if item_id)
+    invalid_items = [item_id for item_id in payload.unused_item_ids if item_id not in grid_ids]
+    if invalid_items:
+        raise HTTPException(400, 'unused_item_ids must come from this trip grid')
+    reflection = TripReflection(trip_id=trip_id, user_id=user['id'], **payload.dict())
+    await db.trip_reflections.insert_one(reflection.dict())
+    return reflection
+
+@api_router.get("/trips/{trip_id}/reflections", response_model=List[TripReflection])
+async def list_trip_reflections(trip_id: str, user: dict = Depends(get_current_user)):
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    docs = await db.trip_reflections.find(
+        {'trip_id': trip_id, 'user_id': user['id']},
+        {'_id': 0},
+    ).sort('created_at', -1).to_list(50)
+    return [TripReflection(**doc) for doc in docs]
+
+@api_router.get("/trips/{trip_id}/invites", response_model=List[TripInvite])
+async def list_trip_invites(trip_id: str, user: dict = Depends(get_current_user)):
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    docs = await db.trip_invites.find(
+        {'trip_id': trip_id, 'owner_id': user['id']},
+        {'_id': 0},
+    ).sort('created_at', -1).to_list(50)
+    return [TripInvite(**doc) for doc in docs]
+
+@api_router.post("/trips/{trip_id}/invites", response_model=TripInvite)
+async def create_trip_invite(
+    trip_id: str,
+    payload: TripInviteCreate,
+    user: dict = Depends(get_current_user),
+):
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    seed = f"{trip.get('destination', 'trip')}-{str(uuid.uuid4())[:6]}"
+    code = re.sub(r'[^A-Z0-9]', '', seed.upper())[:10]
+    invite = TripInvite(
+        trip_id=trip_id,
+        owner_id=user['id'],
+        companion_name=(payload.companion_name or '').strip() or None,
+        code=code,
+    )
+    await db.trip_invites.insert_one(invite.dict())
+    return invite
 
 @api_router.put("/trips/{trip_id}/checklist", response_model=Trip)
 async def update_checklist(trip_id: str, payload: ChecklistUpdate, user: dict = Depends(get_current_user)):
@@ -1414,6 +1757,55 @@ async def list_community_posts(
     visible = [post for post in posts if await can_view_post(post, user['id'])]
     return [await enrich_post(post, user['id']) for post in visible]
 
+@api_router.get("/community/trending", response_model=List[CommunityPost])
+async def list_trending_posts(
+    destination: Optional[str] = None,
+    limit: int = 30,
+    user: dict = Depends(get_current_user),
+):
+    limit = max(1, min(limit, 50))
+    query: Dict[str, Any] = {'visibility': 'public'}
+    if destination:
+        query['destination'] = {'$regex': re.escape(destination.strip()), '$options': 'i'}
+    posts = await db.community_posts.find(query, {'_id': 0}).to_list(200)
+    visible = [post for post in posts if await can_view_post(post, user['id'])]
+    def trending_key(post: dict) -> tuple:
+        created = post.get('created_at')
+        timestamp = created.timestamp() if isinstance(created, datetime) else 0
+        return (
+            int(post.get('likes_count') or 0) * 3 +
+            int(post.get('saves_count') or 0) * 2 +
+            int(post.get('comments_count') or 0),
+            timestamp,
+        )
+    visible.sort(key=trending_key, reverse=True)
+    return [await enrich_post(post, user['id']) for post in visible[:limit]]
+
+@api_router.get("/community/challenges", response_model=List[CommunityChallenge])
+async def list_community_challenges(user: dict = Depends(get_current_user)):
+    return [await build_monthly_challenge()]
+
+@api_router.post("/community/challenges/{challenge_id}/posts/{post_id}/vote")
+async def vote_challenge_post(
+    challenge_id: str,
+    post_id: str,
+    user: dict = Depends(get_current_user),
+):
+    await get_visible_post(post_id, user['id'])
+    if challenge_id != current_challenge_id():
+        raise HTTPException(404, 'Challenge not found')
+    await upsert_social_edge(
+        db.challenge_votes,
+        {'challenge_id': challenge_id, 'post_id': post_id, 'user_id': user['id']},
+        {
+            'challenge_id': challenge_id,
+            'post_id': post_id,
+            'user_id': user['id'],
+            'created_at': datetime.now(timezone.utc),
+        },
+    )
+    return {'status': 'voted'}
+
 @api_router.post("/community/posts", response_model=CommunityPost)
 async def create_community_post(payload: CommunityPostCreate, user: dict = Depends(get_current_user)):
     trip = await db.trips.find_one({'id': payload.trip_id, 'user_id': user['id']}, {'_id': 0})
@@ -1623,6 +2015,62 @@ async def unfollow_user(uid: str, user: dict = Depends(get_current_user)):
         raise HTTPException(400, 'You cannot unfollow yourself')
     await db.follows.delete_one({'follower_id': user['id'], 'following_id': uid})
     return await social_profile_for(uid, user['id'])
+
+@api_router.get("/retention/nudges", response_model=List[TripNudge])
+async def retention_nudges(user: dict = Depends(get_current_user)):
+    trips = await db.trips.find({'user_id': user['id']}, {'_id': 0}).sort('start_date', 1).to_list(200)
+    wardrobe = await db.wardrobe.find({'user_id': user['id']}, {'_id': 0}).to_list(500)
+    today = datetime.now(timezone.utc).date()
+    nudges: List[TripNudge] = []
+
+    for trip in trips:
+        try:
+            start = date.fromisoformat(trip['start_date'])
+            end = date.fromisoformat(trip['end_date'])
+        except Exception:
+            continue
+        days_until = (start - today).days
+        if 0 <= days_until <= 7 and len([item_id for item_id in (trip.get('grid') or []) if item_id]) < 9:
+            nudges.append(TripNudge(
+                id=f"pre-trip-{trip['id']}",
+                kind='pre_trip',
+                trip_id=trip['id'],
+                title=f"{trip['destination']} is in {days_until} days",
+                message='Your grid is not complete yet. Fill the 9 slots before packing day.',
+                action_route='/(tabs)/grid',
+            ))
+        if end < today:
+            existing = await db.trip_reflections.count_documents({'trip_id': trip['id'], 'user_id': user['id']})
+            if existing == 0:
+                nudges.append(TripNudge(
+                    id=f"post-trip-{trip['id']}",
+                    kind='post_trip',
+                    trip_id=trip['id'],
+                    title=f"Reflect on {trip['destination']}",
+                    message='Mark what you wore and what stayed unused so Packr learns for your next trip.',
+                    action_route='/(tabs)/lookbook',
+                ))
+
+    if len(trips) >= 3 and wardrobe:
+        layers = [item for item in wardrobe if item.get('category') == 'layer']
+        layer_name = layers[0].get('name') if layers else wardrobe[0].get('name')
+        nudges.append(TripNudge(
+            id='wardrobe-audit',
+            kind='wardrobe_audit',
+            title='Wardrobe audit',
+            message=f'You have enough trip history to review repeats. Start with {layer_name or "your most-used layer"} and add alternatives.',
+            action_route='/(tabs)/studio',
+        ))
+
+    if not nudges:
+        nudges.append(TripNudge(
+            id='monthly-challenge',
+            kind='challenge',
+            title='Try the monthly challenge',
+            message='Pack 5 days with only neutrals and share one screenshot to the community feed.',
+            action_route='/(tabs)/community',
+        ))
+    return nudges[:5]
 
 @api_router.post("/analytics/events")
 async def record_analytics_event(payload: AnalyticsEventCreate, user: dict = Depends(get_current_user)):
@@ -1890,6 +2338,10 @@ async def seed_templates():
             (db.follows, [('following_id', 1), ('created_at', -1)], False, 'idx_following_created'),
             (db.community_reports, [('post_id', 1), ('reporter_id', 1)], True, 'uniq_post_report'),
             (db.comment_reports, [('comment_id', 1), ('reporter_id', 1)], True, 'uniq_comment_report'),
+            (db.challenge_votes, [('challenge_id', 1), ('post_id', 1), ('user_id', 1)], True, 'uniq_challenge_vote'),
+            (db.trip_reflections, [('trip_id', 1), ('user_id', 1), ('created_at', -1)], False, 'idx_reflection_trip_user'),
+            (db.trip_invites, [('trip_id', 1), ('owner_id', 1), ('created_at', -1)], False, 'idx_invite_trip_owner'),
+            (db.trip_invites, [('code', 1)], True, 'uniq_invite_code'),
         ]
         for collection, keys, unique, name in social_indexes:
             try:

@@ -16,14 +16,15 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, CommunityPost, CommunitySnapshotItem, getApiErrorMessage, resolveApiAssetUrl, SocialProfile, Trip } from '../../src/lib/api';
+import { api, CommunityChallenge, CommunityPost, CommunitySnapshotItem, getApiErrorMessage, resolveApiAssetUrl, SocialProfile, Trip } from '../../src/lib/api';
 import { categoryForSlot } from '../../src/lib/sudoku';
 import { CATEGORY_META } from '../../src/lib/wardrobeMeta';
 
-type FeedScope = 'public' | 'following' | 'saved' | 'mine';
+type FeedScope = 'public' | 'trending' | 'following' | 'saved' | 'mine';
 
 const SCOPES: { id: FeedScope; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { id: 'public', label: 'Explore', icon: 'globe-outline' },
+  { id: 'trending', label: 'Trending', icon: 'trending-up-outline' },
   { id: 'following', label: 'Following', icon: 'people-outline' },
   { id: 'saved', label: 'Saved', icon: 'bookmark-outline' },
   { id: 'mine', label: 'Mine', icon: 'person-circle-outline' },
@@ -52,6 +53,7 @@ export default function CommunityScreen() {
   const [comments, setComments] = useState<Record<string, string>>({});
   const [profile, setProfile] = useState<SocialProfile | null>(null);
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(new Set());
+  const [challenges, setChallenges] = useState<CommunityChallenge[]>([]);
 
   const selectedTripComplete = useMemo(() => {
     return Boolean(trip?.grid?.length === 9 && trip.grid.every(Boolean));
@@ -59,14 +61,16 @@ export default function CommunityScreen() {
 
   const loadPosts = useCallback(async () => {
     try {
-      const r = await api.get('/community/posts', { params: { scope } });
+      const r = scope === 'trending'
+        ? await api.get('/community/trending', { params: { destination: trip?.destination } })
+        : await api.get('/community/posts', { params: { scope } });
       setPosts(r.data);
     } catch (e: unknown) {
       Alert.alert('Feed failed', getApiErrorMessage(e, 'Could not load community posts'));
     } finally {
       setLoading(false);
     }
-  }, [scope]);
+  }, [scope, trip?.destination]);
 
   const loadProfile = useCallback(async () => {
     if (!user?.id) return;
@@ -84,6 +88,15 @@ export default function CommunityScreen() {
   useEffect(() => {
     loadProfile();
   }, [loadProfile]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await api.get('/community/challenges');
+        setChallenges(r.data);
+      } catch {}
+    })();
+  }, []);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -261,6 +274,23 @@ export default function CommunityScreen() {
     ]);
   };
 
+  const voteChallengePost = async (post: CommunityPost) => {
+    const challenge = challenges[0];
+    if (!challenge) return;
+    setBusyPostId(post.id);
+    try {
+      await api.post(`/community/challenges/${challenge.id}/posts/${post.id}/vote`);
+      Haptics.selectionAsync().catch(() => {});
+      setChallenges((current) =>
+        current.map((item, index) => index === 0 ? { ...item, votes_count: item.votes_count + 1 } : item)
+      );
+    } catch (e: unknown) {
+      Alert.alert('Vote failed', getApiErrorMessage(e, 'Could not vote for this post'));
+    } finally {
+      setBusyPostId(null);
+    }
+  };
+
   const reportComment = async (post: CommunityPost, commentId: string) => {
     setBusyPostId(post.id);
     try {
@@ -375,6 +405,24 @@ export default function CommunityScreen() {
           </Pressable>
         </View>
 
+        {challenges.length > 0 && (
+          <View style={{ marginTop: 18 }}>
+            <View style={styles.challengeHeader}>
+              <Text style={[styles.kicker, { color: c.textPrimary }]}>MONTHLY CHALLENGES</Text>
+              <Text style={{ color: c.textTertiary, fontSize: 11 }}>{challenges[0].month}</Text>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingTop: 10 }}>
+              {challenges.map((challenge) => (
+                <ChallengeCard
+                  key={challenge.id}
+                  challenge={challenge}
+                  onTrending={() => setScope('trending')}
+                />
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -432,6 +480,8 @@ export default function CommunityScreen() {
                 onDeletePost={() => deletePost(post)}
                 onReportPost={() => reportPost(post)}
                 onReportComment={(commentId) => reportComment(post, commentId)}
+                onChallengeVote={() => voteChallengePost(post)}
+                challengeActive={challenges.length > 0}
               />
             ))}
           </View>
@@ -494,6 +544,40 @@ function ProfileStat({ label, value }: { label: string; value: number }) {
   );
 }
 
+function ChallengeCard({
+  challenge,
+  onTrending,
+}: {
+  challenge: CommunityChallenge;
+  onTrending: () => void;
+}) {
+  const { c } = useTheme();
+  return (
+    <Pressable
+      onPress={onTrending}
+      style={[styles.challengeCard, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}
+    >
+      <View style={[styles.challengeIcon, { borderColor: c.accent }]}>
+        <Ionicons name="trophy-outline" size={18} color={c.accent} />
+      </View>
+      <Text style={{ color: c.textPrimary, fontSize: 15, fontWeight: '900', marginTop: 10 }}>
+        {challenge.title}
+      </Text>
+      <Text style={{ color: c.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 6 }} numberOfLines={3}>
+        {challenge.prompt}
+      </Text>
+      <View style={styles.challengeStats}>
+        <Text style={{ color: c.textTertiary, fontSize: 10, fontWeight: '800' }}>
+          {challenge.posts_count} POSTS
+        </Text>
+        <Text style={{ color: c.textTertiary, fontSize: 10, fontWeight: '800' }}>
+          {challenge.votes_count} VOTES
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
 function PostCard({
   post,
   currentUserId,
@@ -508,6 +592,8 @@ function PostCard({
   onDeletePost,
   onReportPost,
   onReportComment,
+  onChallengeVote,
+  challengeActive,
 }: {
   post: CommunityPost;
   currentUserId: string | null;
@@ -522,6 +608,8 @@ function PostCard({
   onDeletePost: () => void;
   onReportPost: () => void;
   onReportComment: (commentId: string) => void;
+  onChallengeVote: () => void;
+  challengeActive: boolean;
 }) {
   const { c } = useTheme();
   const isOwnPost = post.author_id === currentUserId;
@@ -647,6 +735,15 @@ function PostCard({
             disabled={busy}
             onPress={onLike}
           />
+          {challengeActive && (
+            <ActionButton
+              icon="trophy-outline"
+              label="Vote"
+              active={false}
+              disabled={busy}
+              onPress={onChallengeVote}
+            />
+          )}
           <StatPill icon="chatbubble-outline" label={String(post.comments_count)} />
         </View>
         <ActionButton
@@ -836,6 +933,10 @@ const styles = StyleSheet.create({
   },
   profileStats: { flexDirection: 'row', marginTop: 14 },
   profileStat: { flex: 1, alignItems: 'center', gap: 2 },
+  challengeHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  challengeCard: { width: 260, borderWidth: 1, borderRadius: 8, padding: 14 },
+  challengeIcon: { width: 38, height: 38, borderWidth: 1, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  challengeStats: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 },
   shareTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   captionInput: {
     minHeight: 72,

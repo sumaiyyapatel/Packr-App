@@ -214,3 +214,67 @@ export type SocialProfile = {
   following_count: number;
   posts_count: number;
 };
+
+export type OutfitSuggestion = {
+  outfit_key: string;
+  outfit_index: number;
+  date?: string | null;
+  occasion: string;
+  score: number;
+  reason: string;
+  item_ids: string[];
+  item_names: string[];
+};
+
+export type TripStats = {
+  packing_score: number;
+  items_per_day: number;
+  outfit_variety: number;
+  most_used_color?: string | null;
+  completed_grid: boolean;
+  planned_days: number;
+  trip_days: number;
+  checklist_progress: number;
+  total_weight_kg: number;
+};
+
+export type TripNudge = {
+  id: string;
+  kind: 'pre_trip' | 'wardrobe_audit' | 'post_trip' | 'challenge';
+  trip_id?: string | null;
+  title: string;
+  message: string;
+  action_route: string;
+};
+
+export type TripReflection = {
+  id: string;
+  trip_id: string;
+  user_id: string;
+  worn_outfit_keys: string[];
+  unused_item_ids: string[];
+  notes: string;
+  rating?: number | null;
+  created_at: string;
+};
+
+export type CommunityChallenge = {
+  id: string;
+  month: string;
+  title: string;
+  prompt: string;
+  destination?: string | null;
+  climate?: string | null;
+  posts_count: number;
+  votes_count: number;
+};
+
+export type TripInvite = {
+  id: string;
+  trip_id: string;
+  owner_id: string;
+  code: string;
+  companion_name?: string | null;
+  status: 'pending' | 'accepted';
+  created_at: string;
+};

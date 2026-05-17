@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, getApiErrorMessage, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
+import { api, getApiErrorMessage, OutfitSuggestion, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
 import { generate27Outfits, isGridComplete, suggestOccasion, Outfit } from '../../src/lib/sudoku';
 import { CATEGORY_META } from '../../src/lib/wardrobeMeta';
 
@@ -27,6 +27,9 @@ export default function Lookbook() {
   const upsertTrip = useStore((s) => s.upsertTrip);
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0];
   const [filter, setFilter] = useState<string>('All');
+  const [suggestions, setSuggestions] = useState<OutfitSuggestion[]>([]);
+  const [suggestionDate, setSuggestionDate] = useState<string | null>(null);
+  const [reflecting, setReflecting] = useState(false);
 
   const itemsById = useMemo(() => {
     const map: Record<string, WardrobeItem> = {};
@@ -59,6 +62,31 @@ export default function Lookbook() {
     () => (trip ? dateRange(trip.start_date, trip.end_date) : []),
     [trip]
   );
+
+  useEffect(() => {
+    if (!tripDates.length) return;
+    setSuggestionDate((current) => current && tripDates.includes(current) ? current : tripDates[0]);
+  }, [tripDates]);
+
+  useEffect(() => {
+    if (!trip || !suggestionDate || !isGridComplete(trip.grid)) {
+      setSuggestions([]);
+      return;
+    }
+    (async () => {
+      try {
+        const r = await api.get(`/trips/${trip.id}/outfit-suggestions`, {
+          params: {
+            date: suggestionDate,
+            occasion: filter !== 'All' && filter !== 'Favorites' ? filter : undefined,
+          },
+        });
+        setSuggestions(r.data);
+      } catch {
+        setSuggestions([]);
+      }
+    })();
+  }, [trip, suggestionDate, filter]);
 
   const toggleFav = async (outfit: Outfit & { isFav: boolean }) => {
     if (!trip) return;
@@ -119,6 +147,29 @@ export default function Lookbook() {
     );
   };
 
+  const savePostTripReflection = async () => {
+    if (!trip) return;
+    const planned = Object.values(trip.outfit_plan || {});
+    const favoriteKeys = (trip.favorites || []).filter((item): item is string => typeof item === 'string' && item.includes('|'));
+    const worn = planned.length ? planned : favoriteKeys;
+    const used = new Set(worn.flatMap((key) => key.split('|')));
+    const unused = trip.grid.filter((id): id is string => Boolean(id && !used.has(id)));
+    setReflecting(true);
+    try {
+      await api.post(`/trips/${trip.id}/reflections`, {
+        worn_outfit_keys: worn,
+        unused_item_ids: unused,
+        notes: 'Saved from post-trip reflection',
+        rating: null,
+      });
+      Alert.alert('Reflection saved', 'Unused items and worn outfits were recorded.');
+    } catch (e: unknown) {
+      Alert.alert('Reflection failed', getApiErrorMessage(e, 'Could not save reflection'));
+    } finally {
+      setReflecting(false);
+    }
+  };
+
   if (!trip) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
@@ -130,6 +181,7 @@ export default function Lookbook() {
   }
 
   const complete = isGridComplete(trip.grid);
+  const tripEnded = new Date(`${trip.end_date}T23:59:59`).getTime() < Date.now();
 
   const publishTemplate = async () => {
     if (!complete) return;
@@ -228,18 +280,91 @@ export default function Lookbook() {
             {tripDates.map((day) => {
               const key = trip.outfit_plan?.[day];
               const planned = tagged.find((outfit) => outfit.key === key);
+              const active = suggestionDate === day;
               return (
-                <View key={day} style={[styles.dayChip, { borderColor: key ? c.accent : c.borderSubtle }]}>
-                  <Text style={{ color: key ? c.accent : c.textSecondary, fontSize: 10, fontWeight: '800' }}>{day.slice(5)}</Text>
+                <Pressable
+                  key={day}
+                  onPress={() => setSuggestionDate(day)}
+                  style={[
+                    styles.dayChip,
+                    {
+                      borderColor: active || key ? c.accent : c.borderSubtle,
+                      backgroundColor: active ? c.accent + '18' : 'transparent',
+                    },
+                  ]}
+                >
+                  <Text style={{ color: active || key ? c.accent : c.textSecondary, fontSize: 10, fontWeight: '800' }}>{day.slice(5)}</Text>
                   <Text style={{ color: c.textTertiary, fontSize: 10, marginTop: 2 }}>
                     {planned ? `Outfit ${planned.index + 1}` : 'Unplanned'}
                   </Text>
-                </View>
+                </Pressable>
               );
             })}
           </ScrollView>
 
           <ScrollView contentContainerStyle={{ padding: 24, gap: 16 }} showsVerticalScrollIndicator={false}>
+            {suggestions.length > 0 && (
+              <View style={[styles.smartPanel, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+                <View style={styles.smartHeader}>
+                  <View>
+                    <Text style={[styles.kicker, { color: c.accent }]}>SMART PICKS</Text>
+                    <Text style={{ color: c.textSecondary, fontSize: 12, marginTop: 4 }}>
+                      Top 5 for {suggestionDate?.slice(5)} {filter !== 'All' && filter !== 'Favorites' ? `- ${filter}` : ''}
+                    </Text>
+                  </View>
+                  <Ionicons name="sparkles-outline" size={18} color={c.accent} />
+                </View>
+                <View style={{ gap: 8, marginTop: 12 }}>
+                  {suggestions.map((pick) => {
+                    const outfit = tagged.find((item) => item.key === pick.outfit_key);
+                    if (!outfit) return null;
+                    return (
+                      <Pressable
+                        key={pick.outfit_key}
+                        onPress={() => assignOutfitDay(outfit)}
+                        style={[styles.smartRow, { borderColor: c.borderSubtle, backgroundColor: c.elevated }]}
+                      >
+                        <View style={[styles.scoreDot, { borderColor: c.accent }]}>
+                          <Text style={{ color: c.accent, fontSize: 11, fontWeight: '900' }}>{pick.score}</Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: c.textPrimary, fontSize: 13, fontWeight: '900' }}>
+                            Outfit {outfit.index + 1}
+                          </Text>
+                          <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+                            {pick.reason} - {pick.item_names.join(', ')}
+                          </Text>
+                        </View>
+                        <Ionicons name="calendar-outline" size={16} color={c.textSecondary} />
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+
+            {tripEnded && (
+              <View style={[styles.reflectionPanel, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.kicker, { color: c.accent }]}>POST-TRIP</Text>
+                  <Text style={{ color: c.textPrimary, fontSize: 15, fontWeight: '900', marginTop: 4 }}>
+                    Record what worked
+                  </Text>
+                  <Text style={{ color: c.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 4 }}>
+                    Saves planned or favorite outfits as worn and marks the rest for audit.
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={savePostTripReflection}
+                  disabled={reflecting}
+                  style={[styles.reflectionButton, { borderColor: c.accent }]}
+                >
+                  <Ionicons name="checkmark-circle-outline" size={15} color={c.accent} />
+                  <Text style={{ color: c.accent, fontSize: 11, fontWeight: '900' }}>SAVE</Text>
+                </Pressable>
+              </View>
+            )}
+
             {filtered.length === 0 && (
               <Text style={{ color: c.textTertiary, textAlign: 'center', marginTop: 24 }}>
                 No outfits match this filter.
@@ -378,6 +503,12 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderRadius: 4, paddingVertical: 12,
   },
   dayChip: { minWidth: 92, borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  smartPanel: { borderWidth: 1, borderRadius: 8, padding: 14 },
+  smartHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  smartRow: { flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderRadius: 8, padding: 10 },
+  scoreDot: { width: 36, height: 36, borderRadius: 18, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  reflectionPanel: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderRadius: 8, padding: 14 },
+  reflectionButton: { height: 36, borderWidth: 1, borderRadius: 8, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 5, paddingHorizontal: 10 },
   card: { borderWidth: 1, borderRadius: 8, overflow: 'hidden' },
   cardHeader: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',

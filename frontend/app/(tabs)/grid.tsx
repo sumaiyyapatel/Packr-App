@@ -45,9 +45,11 @@ export default function GridScreen() {
   const [grid, setGrid] = useState<(string | null)[]>(trip?.grid || Array(9).fill(null));
   const [saving, setSaving] = useState(false);
   const [pickerSlot, setPickerSlot] = useState<number | null>(null);
+  const [completeMoment, setCompleteMoment] = useState(false);
 
   // Slot rects in absolute screen coordinates (set via onLayout + measure)
   const slotRects = useRef<Record<number, SlotRect>>({});
+  const wasComplete = useRef(false);
 
   useEffect(() => {
     if (trip) setGrid(trip.grid);
@@ -63,6 +65,18 @@ export default function GridScreen() {
 
   const filled = grid.filter(Boolean).length;
   const complete = isGridComplete(grid);
+
+  useEffect(() => {
+    if (complete && !wasComplete.current) {
+      setCompleteMoment(true);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      const timer = setTimeout(() => setCompleteMoment(false), 2200);
+      wasComplete.current = true;
+      return () => clearTimeout(timer);
+    }
+    if (!complete) wasComplete.current = false;
+    return undefined;
+  }, [complete]);
 
   const saveGrid = async (g: (string | null)[]) => {
     if (!trip) return;
@@ -96,6 +110,7 @@ export default function GridScreen() {
     const existing = next.indexOf(item.id);
     if (existing >= 0) next[existing] = null;
     next[slot] = item.id;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     setGrid(next);
     setPickerSlot(null);
     saveGrid(next);
@@ -167,7 +182,7 @@ export default function GridScreen() {
         <View style={styles.headerRow}>
           <View>
             <Text style={[styles.kicker, { color: c.accent }]}>THE GRID</Text>
-            <Text style={[styles.h1, { color: c.textPrimary }]}>Drag to build</Text>
+            <Text style={[styles.h1, { color: c.textPrimary }]}>Tap or drag</Text>
           </View>
           {saving && <ActivityIndicator color={c.accent} />}
         </View>
@@ -266,10 +281,26 @@ export default function GridScreen() {
           </View>
         )}
 
+        {completeMoment && !conflicts.hasConflicts && (
+          <View style={[styles.completeBox, { borderColor: c.accent, backgroundColor: c.accent + '18' }]}>
+            <View style={styles.completeDots}>
+              {[0, 1, 2, 3, 4].map((dot) => (
+                <View key={dot} style={[styles.completeDot, { backgroundColor: c.accent, opacity: 1 - dot * 0.12 }]} />
+              ))}
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: c.textPrimary, fontSize: 14, fontWeight: '900' }}>Grid complete</Text>
+              <Text style={{ color: c.textSecondary, fontSize: 12, marginTop: 2 }}>
+                9 items can now make 27 outfits.
+              </Text>
+            </View>
+          </View>
+        )}
+
         <View style={{ height: 16 }} />
-        <Text style={[styles.section, { color: c.textPrimary }]}>WARDROBE · DRAG TO GRID</Text>
+        <Text style={[styles.section, { color: c.textPrimary }]}>WARDROBE - TAP OR DRAG</Text>
         <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 4 }}>
-          Long-press an item, then drag it onto a matching slot. Tap a filled slot to remove.
+          Tap an empty slot to pick a matching item. Long-press an item to drag it.
         </Text>
 
         <ScrollView
@@ -520,6 +551,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: 6,
     padding: 10, marginTop: 12,
   },
+  completeBox: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 12,
+  },
+  completeDots: { flexDirection: 'row', gap: 4 },
+  completeDot: { width: 7, height: 7, borderRadius: 4 },
   section: { fontSize: 11, letterSpacing: 2, fontWeight: '600', marginTop: 16 },
   itemEmpty: {
     width: 240, height: 110, borderWidth: 1, borderRadius: 6,

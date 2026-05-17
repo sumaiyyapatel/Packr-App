@@ -22,6 +22,7 @@ export default function TemplatesIndex() {
   const [q, setQ] = useState('');
   const [climate, setClimate] = useState('');
   const [source, setSource] = useState<'all' | 'official' | 'community'>('all');
+  const [daysRange, setDaysRange] = useState<{ label: string; min?: number; max?: number }>({ label: 'any length' });
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -32,6 +33,8 @@ export default function TemplatesIndex() {
             q: q.trim() || undefined,
             climate: climate || undefined,
             source,
+            days_min: daysRange.min,
+            days_max: daysRange.max,
           },
         });
         setTemplates(r.data);
@@ -40,7 +43,7 @@ export default function TemplatesIndex() {
     })();
     }, 250);
     return () => clearTimeout(timer);
-  }, [q, climate, source]);
+  }, [q, climate, source, daysRange]);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
@@ -92,6 +95,26 @@ export default function TemplatesIndex() {
                 <Text style={{ color: climate === item ? c.bg : c.textSecondary, fontSize: 11, fontWeight: '800' }}>{(item || 'any climate').toUpperCase()}</Text>
               </Pressable>
             ))}
+          </ScrollView>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+            {[
+              { label: 'any length' },
+              { label: 'weekend', min: 1, max: 3 },
+              { label: '4-6 days', min: 4, max: 6 },
+              { label: '1 week', min: 7, max: 8 },
+              { label: '9+ days', min: 9 },
+            ].map((item) => {
+              const active = daysRange.label === item.label;
+              return (
+                <Pressable
+                  key={item.label}
+                  onPress={() => setDaysRange(item)}
+                  style={[styles.filterChip, { borderColor: active ? c.accent : c.borderSubtle, backgroundColor: active ? c.accent : 'transparent' }]}
+                >
+                  <Text style={{ color: active ? c.bg : c.textSecondary, fontSize: 11, fontWeight: '800' }}>{item.label.toUpperCase()}</Text>
+                </Pressable>
+              );
+            })}
           </ScrollView>
           {templates.map((t) => (
             <Pressable
@@ -161,7 +184,7 @@ export default function TemplatesIndex() {
                 ))}
                 <View style={{ flex: 1 }} />
                 <Text style={{ color: c.textTertiary, fontSize: 11 }}>
-                  {t.days}d · {t.season}
+                  {t.days}d - {t.season}
                 </Text>
               </View>
             </Pressable>

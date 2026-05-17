@@ -13,7 +13,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, Trip, WardrobeItem } from '../../src/lib/api';
+import { api, Trip, TripInvite, TripNudge, TripStats, WardrobeItem } from '../../src/lib/api';
 import { gridProgress, isGridComplete } from '../../src/lib/sudoku';
 import { checkClimateFit } from '../../src/lib/climate';
 
@@ -49,6 +49,10 @@ export default function Dashboard() {
 
   const [refreshing, setRefreshing] = useState(false);
   const [weather, setWeather] = useState<Record<string, any>>({});
+  const [stats, setStats] = useState<TripStats | null>(null);
+  const [nudges, setNudges] = useState<TripNudge[]>([]);
+  const [invites, setInvites] = useState<TripInvite[]>([]);
+  const [inviteBusy, setInviteBusy] = useState(false);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -84,6 +88,28 @@ export default function Dashboard() {
 
   const selected = trips.find((t) => t.id === selectedTripId) || trips[0];
 
+  useEffect(() => {
+    if (!selected?.id) {
+      setStats(null);
+      setInvites([]);
+      return;
+    }
+    (async () => {
+      try {
+        const [statsResponse, invitesResponse, nudgesResponse] = await Promise.all([
+          api.get(`/trips/${selected.id}/stats`),
+          api.get(`/trips/${selected.id}/invites`),
+          api.get('/retention/nudges'),
+        ]);
+        setStats(statsResponse.data);
+        setInvites(invitesResponse.data);
+        setNudges(nudgesResponse.data);
+      } catch {
+        setStats(null);
+      }
+    })();
+  }, [selected?.id]);
+
   const itemsById = useMemo(() => {
     const m: Record<string, WardrobeItem> = {};
     for (const w of wardrobe) m[w.id] = w;
@@ -114,6 +140,24 @@ export default function Dashboard() {
         },
       },
     ]);
+  };
+
+  const createInvite = async () => {
+    if (!selected) return;
+    setInviteBusy(true);
+    try {
+      const r = await api.post(`/trips/${selected.id}/invites`, {});
+      setInvites((current) => [r.data, ...current]);
+    } catch {
+      Alert.alert('Invite failed', 'Could not create an invite code.');
+    } finally {
+      setInviteBusy(false);
+    }
+  };
+
+  const openNudge = (nudge: TripNudge) => {
+    if (nudge.trip_id) setSelectedTrip(nudge.trip_id);
+    router.push(nudge.action_route as any);
   };
 
   return (
@@ -220,7 +264,7 @@ export default function Dashboard() {
                   {t.destination}
                 </Text>
                 <Text style={[styles.tripDates, { color: c.textTertiary }]}>
-                  {t.start_date} → {t.end_date} · {days}d
+                  {`${t.start_date} -> ${t.end_date} - ${days}d`}
                 </Text>
 
                 <View style={[styles.weatherRow, { borderColor: c.borderSubtle }]}>
@@ -236,7 +280,7 @@ export default function Dashboard() {
 
                 <View style={{ height: 12 }} />
                 <Text style={[styles.gridLabel, { color: c.textTertiary }]}>
-                  PACKING · {t.grid.filter(Boolean).length}/9
+                  PACKING - {t.grid.filter(Boolean).length}/9
                 </Text>
                 <View style={[styles.progressTrack, { backgroundColor: c.elevated }]}>
                   <View
@@ -257,20 +301,78 @@ export default function Dashboard() {
         <Text style={[styles.section, { color: c.textPrimary }]}>STATS</Text>
         <View style={[styles.statBox, { borderColor: c.borderSubtle }]}>
           <View style={styles.statCell}>
-            <Text style={[styles.statValue, { color: c.textPrimary }]}>{totalOutfits}</Text>
-            <Text style={[styles.statName, { color: c.textTertiary }]}>OUTFITS</Text>
+            <Text style={[styles.statValue, { color: c.textPrimary }]}>{stats?.packing_score ?? totalOutfits}</Text>
+            <Text style={[styles.statName, { color: c.textTertiary }]}>{stats ? 'SCORE' : 'OUTFITS'}</Text>
           </View>
           <View style={[styles.statDivider, { backgroundColor: c.borderSubtle }]} />
           <View style={styles.statCell}>
-            <Text style={[styles.statValue, { color: c.textPrimary }]}>{itemsPacked}/9</Text>
-            <Text style={[styles.statName, { color: c.textTertiary }]}>ITEMS</Text>
+            <Text style={[styles.statValue, { color: c.textPrimary }]}>{stats?.planned_days ?? itemsPacked}/{stats?.trip_days ?? 9}</Text>
+            <Text style={[styles.statName, { color: c.textTertiary }]}>{stats ? 'DAYS' : 'ITEMS'}</Text>
           </View>
           <View style={[styles.statDivider, { backgroundColor: c.borderSubtle }]} />
           <View style={styles.statCell}>
-            <Text style={[styles.statValue, { color: c.textPrimary }]}>{efficiency}</Text>
-            <Text style={[styles.statName, { color: c.textTertiary }]}>RATIO</Text>
+            <Text style={[styles.statValue, { color: c.textPrimary }]}>{stats?.items_per_day ?? efficiency}</Text>
+            <Text style={[styles.statName, { color: c.textTertiary }]}>{stats ? 'ITEMS/DAY' : 'RATIO'}</Text>
           </View>
         </View>
+
+        {stats && (
+          <View style={[styles.scorePanel, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+            <View style={styles.scoreHeader}>
+              <Text style={[styles.section, { color: c.textPrimary }]}>PACKING SCORE</Text>
+              <Text style={{ color: c.accent, fontSize: 12, fontWeight: '800' }}>{stats.packing_score}/100</Text>
+            </View>
+            <View style={[styles.progressTrack, { backgroundColor: c.elevated, marginTop: 10 }]}>
+              <View style={[styles.progressFill, { backgroundColor: c.accent, width: `${stats.packing_score}%` }]} />
+            </View>
+            <View style={styles.scoreMetaRow}>
+              <ScoreMeta label="Variety" value={String(stats.outfit_variety)} />
+              <ScoreMeta label="Checklist" value={`${Math.round(stats.checklist_progress * 100)}%`} />
+              <ScoreMeta label="Weight" value={`${stats.total_weight_kg.toFixed(1)}kg`} />
+            </View>
+          </View>
+        )}
+
+        <View style={{ height: 24 }} />
+
+        <View style={styles.sectionRow}>
+          <Text style={[styles.section, { color: c.textPrimary }]}>SMART NUDGES</Text>
+          <Text style={[styles.subdued, { color: c.textTertiary }]}>{nudges.length} ACTIVE</Text>
+        </View>
+        <View style={{ gap: 10, marginTop: 12 }}>
+          {nudges.map((nudge) => (
+            <NudgeCard key={nudge.id} nudge={nudge} onPress={() => openNudge(nudge)} />
+          ))}
+        </View>
+
+        {selected && (
+          <>
+            <View style={{ height: 24 }} />
+            <View style={[styles.invitePanel, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.section, { color: c.textPrimary }]}>PACK TOGETHER</Text>
+                <Text style={{ color: c.textSecondary, fontSize: 13, marginTop: 6, lineHeight: 18 }}>
+                  Invite a travel companion to build their own matching grid for this trip.
+                </Text>
+                {invites[0] && (
+                  <Text style={{ color: c.accent, fontSize: 16, fontWeight: '900', marginTop: 10 }}>
+                    CODE {invites[0].code}
+                  </Text>
+                )}
+              </View>
+              <Pressable
+                onPress={createInvite}
+                disabled={inviteBusy}
+                style={[styles.inviteButton, { borderColor: c.accent }]}
+              >
+                <Ionicons name="person-add-outline" size={16} color={c.accent} />
+                <Text style={{ color: c.accent, fontSize: 11, fontWeight: '900' }}>
+                  {invites[0] ? 'NEW' : 'INVITE'}
+                </Text>
+              </Pressable>
+            </View>
+          </>
+        )}
 
         {climateFit && climateFit.warnings.length > 0 && (
           <View
@@ -288,12 +390,12 @@ export default function Dashboard() {
                   marginLeft: 6,
                 }}
               >
-                CLIMATE FIT · {climateFit.climate.toUpperCase()}
+                CLIMATE FIT - {climateFit.climate.toUpperCase()}
               </Text>
             </View>
             {climateFit.warnings.map((w, i) => (
               <Text key={i} style={{ color: c.textPrimary, fontSize: 12, marginTop: 2 }}>
-                • {w}
+                - {w}
               </Text>
             ))}
           </View>
@@ -312,7 +414,7 @@ export default function Dashboard() {
                   marginLeft: 6,
                 }}
               >
-                CLIMATE FIT · {climateFit.climate.toUpperCase()} · LOOKS GOOD
+                CLIMATE FIT - {climateFit.climate.toUpperCase()} - LOOKS GOOD
               </Text>
             </View>
           </View>
@@ -357,7 +459,7 @@ export default function Dashboard() {
             { borderColor: c.accent, opacity: pressed ? 0.85 : 1 },
           ]}
         >
-          <Text style={[styles.ctaText, { color: c.accent }]}>BUILD THE GRID →</Text>
+          <Text style={[styles.ctaText, { color: c.accent }]}>BUILD THE GRID</Text>
         </Pressable>
 
         <View style={{ height: 12 }} />
@@ -401,6 +503,43 @@ function GuideStep({ done, label }: { done: boolean; label: string }) {
   );
 }
 
+function ScoreMeta({ label, value }: { label: string; value: string }) {
+  const { c } = useTheme();
+  return (
+    <View style={styles.scoreMeta}>
+      <Text style={{ color: c.textPrimary, fontSize: 15, fontWeight: '900' }}>{value}</Text>
+      <Text style={{ color: c.textTertiary, fontSize: 9, letterSpacing: 1, marginTop: 2 }}>{label.toUpperCase()}</Text>
+    </View>
+  );
+}
+
+function NudgeCard({ nudge, onPress }: { nudge: TripNudge; onPress: () => void }) {
+  const { c } = useTheme();
+  const icon: Record<TripNudge['kind'], keyof typeof Ionicons.glyphMap> = {
+    pre_trip: 'notifications-outline',
+    wardrobe_audit: 'shirt-outline',
+    post_trip: 'sparkles-outline',
+    challenge: 'trophy-outline',
+  };
+  return (
+    <Pressable
+      onPress={onPress}
+      style={[styles.nudgeCard, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}
+    >
+      <View style={[styles.nudgeIcon, { borderColor: c.accent }]}>
+        <Ionicons name={icon[nudge.kind]} size={16} color={c.accent} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={{ color: c.textPrimary, fontSize: 14, fontWeight: '900' }}>{nudge.title}</Text>
+        <Text style={{ color: c.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 3 }}>
+          {nudge.message}
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={16} color={c.textTertiary} />
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { padding: 24, paddingTop: 16, paddingBottom: 48 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
@@ -438,6 +577,14 @@ const styles = StyleSheet.create({
   statDivider: { width: 1, height: 36 },
   statValue: { fontSize: 26, fontWeight: '700', letterSpacing: -1 },
   statName: { fontSize: 10, letterSpacing: 1.5, marginTop: 4 },
+  scorePanel: { borderWidth: 1, borderRadius: 8, padding: 14, marginTop: 12 },
+  scoreHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  scoreMetaRow: { flexDirection: 'row', marginTop: 12 },
+  scoreMeta: { flex: 1, alignItems: 'center' },
+  nudgeCard: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderRadius: 8, padding: 12 },
+  nudgeIcon: { width: 34, height: 34, borderRadius: 8, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  invitePanel: { flexDirection: 'row', gap: 12, borderWidth: 1, borderRadius: 8, padding: 14, alignItems: 'center' },
+  inviteButton: { height: 38, borderWidth: 1, borderRadius: 8, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 5, paddingHorizontal: 10 },
   wardrobeBox: { borderWidth: 1, borderRadius: 8, padding: 16, marginTop: 12, gap: 12 },
   wardrobeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   catLabel: { fontSize: 12, letterSpacing: 1.5, fontWeight: '600', width: 80 },

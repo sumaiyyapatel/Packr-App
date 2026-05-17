@@ -247,6 +247,7 @@ function ItemEditorModal({
   const [tagsText, setTagsText] = useState('');
   const [saving, setSaving] = useState(false);
   const [cleaning, setCleaning] = useState(false);
+  const [autoClean, setAutoClean] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -259,6 +260,7 @@ function ItemEditorModal({
     setSelectedTags(uniqueTags(item?.tags || []));
     setTagsText('');
     setCleaning(false);
+    setAutoClean(true);
     setErr(null);
   }, [visible, item]);
 
@@ -316,9 +318,25 @@ function ItemEditorModal({
 
     setSaving(true);
     try {
-      if (imageBase64 && imageChanged) {
+      let imageForSave = imageBase64;
+      if (imageForSave.startsWith('data:') && imageChanged && autoClean) {
         try {
-          const pr = await api.post('/palette', { image: imageBase64 });
+          setCleaning(true);
+          const cr = await api.post('/cutout', { image: imageForSave });
+          if (cr.data?.image) {
+            imageForSave = cr.data.image;
+            setImageBase64(cr.data.image);
+          }
+        } catch {
+          // Keep the original photo if automatic cleanup is not good enough.
+        } finally {
+          setCleaning(false);
+        }
+      }
+
+      if (imageForSave && imageChanged) {
+        try {
+          const pr = await api.post('/palette', { image: imageForSave });
           if (pr.data?.colors?.length) palette = pr.data.colors;
         } catch {
           palette = pickPaletteFromTags(tags);
@@ -326,9 +344,9 @@ function ItemEditorModal({
       }
       if (!palette.length) palette = pickPaletteFromTags(tags);
 
-      let image = imageBase64;
-      if (imageBase64.startsWith('data:') && imageChanged) {
-        const upload = await api.post('/uploads/wardrobe-image', { image: imageBase64 });
+      let image = imageForSave;
+      if (imageForSave.startsWith('data:') && imageChanged) {
+        const upload = await api.post('/uploads/wardrobe-image', { image: imageForSave });
         image = upload.data.url;
       }
 
@@ -420,6 +438,23 @@ function ItemEditorModal({
                   <Text style={{ color: c.textPrimary, fontSize: 12, fontWeight: '800' }}>Remove background</Text>
                 </>
               )}
+            </Pressable>
+
+            <Pressable
+              onPress={() => setAutoClean((current) => !current)}
+              style={[styles.autoCleanRow, { borderColor: autoClean ? c.accent : c.borderSubtle, backgroundColor: c.surface }]}
+            >
+              <Ionicons
+                name={autoClean ? 'checkbox-outline' : 'square-outline'}
+                size={18}
+                color={autoClean ? c.accent : c.textTertiary}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: c.textPrimary, fontSize: 13, fontWeight: '800' }}>Auto clean on save</Text>
+                <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 2 }}>
+                  Keeps product-style photos optional if the cutout misses.
+                </Text>
+              </View>
             </Pressable>
 
             <Text style={[styles.label, { color: c.textTertiary }]}>NAME</Text>
@@ -615,6 +650,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     flexDirection: 'row',
     gap: 8,
+    marginTop: 10,
+  },
+  autoCleanRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 10,
     marginTop: 10,
   },
   label: { fontSize: 11, letterSpacing: 1.4, marginBottom: 6, marginTop: 16, fontWeight: '800' },
