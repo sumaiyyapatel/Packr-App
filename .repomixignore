@@ -1,0 +1,75 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Generated app/build output
+dist/
+build/
+web-build/
+coverage/
+frontend/dist/
+frontend/web-build/
+frontend/android/
+android-sdk/
+*.apk
+*.aab
+*.aar
+*.so
+
+# Caches
+.cache/
+.expo/
+.expo-home/
+.metro-cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.tsbuildinfo
+frontend/.expo/
+frontend/.expo-home/
+frontend/.metro-cache/
+
+# Runtime output
+backend/uploads/
+.codex-logs/
+frontend/.codex-logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Secrets and local-only config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.jks
+*.p8
+*.p12
+*credentials*.json
+*token*.json
+frontend/google-services.json
+backend/google-services.json
+
+# Large generated dependency metadata
+frontend/package-lock.json
+
+# Binary/media assets
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.ico
+*.ttf
+*.otf
+
+# Repo cleanup / historical artifacts
+memory/
+test_reports/
+test_result.md
+design_guidelines.json
+Packr App/
