@@ -46,8 +46,14 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="lookbook"
         options={{
-          title: 'LOOKBOOK',
-          tabBarIcon: ({ color }) => <Ionicons name="albums-outline" size={20} color={color} />,
+          href: null,
+        }}
+      />
+      <Tabs.Screen
+        name="community"
+        options={{
+          title: 'COMMUNITY',
+          tabBarIcon: ({ color }) => <Ionicons name="people-outline" size={20} color={color} />,
         }}
       />
       <Tabs.Screen

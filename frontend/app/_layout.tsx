@@ -7,6 +7,7 @@ import { useFonts } from 'expo-font';
 import { Ionicons } from '@expo/vector-icons';
 import { ThemeProvider, useTheme } from '../src/theme/ThemeProvider';
 import { useStore } from '../src/lib/store';
+import { installMonitoring } from '../src/lib/monitoring';
 import { View, ActivityIndicator } from 'react-native';
 
 function RootGate() {
@@ -21,6 +22,7 @@ function RootGate() {
   const [fontsLoaded] = useFonts({ ...Ionicons.font });
 
   useEffect(() => {
+    installMonitoring();
     hydrate();
   }, [hydrate]);
 
@@ -44,7 +46,7 @@ function RootGate() {
       if (segments[0] !== 'onboarding') router.replace('/onboarding/trip-create');
       return;
     }
-    if (!inTabs && !inTemplates && segments[0] !== 'pro') router.replace('/(tabs)');
+    if (!inTabs && !inTemplates && !['settings', 'outfits'].includes(String(segments[0]))) router.replace('/(tabs)');
   }, [hydrated, user, onboarded, trips.length, segments, router]);
 
   if (!hydrated || !fontsLoaded) {
@@ -63,7 +65,8 @@ function RootGate() {
         <Stack.Screen name="onboarding" />
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="templates" />
-        <Stack.Screen name="pro" options={{ presentation: 'modal' }} />
+        <Stack.Screen name="outfits" />
+        <Stack.Screen name="settings" options={{ presentation: 'modal' }} />
       </Stack>
     </>
   );

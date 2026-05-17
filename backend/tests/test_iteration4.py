@@ -142,82 +142,58 @@ class TestPaletteGuard:
         assert r.status_code == 413, f"Expected 413, got {r.status_code}: {r.text[:200]}"
 
 
-# ============== FREE TRIP CAP ==============
+# ============== V1 PUBLIC LAUNCH: NO FREE TRIP CAP ==============
 class TestFreeTripCap:
-    def test_free_user_3rd_trip_402(self, api_url, session):
+    def test_free_user_can_create_more_than_two_trips_when_pro_disabled(self, api_url, session):
         data = _register(api_url, session, f"TEST_cap_{uuid.uuid4().hex[:6]}@packr.app")
         h = _hdr(data["token"])
-        # First 2 trips OK
-        for i in range(2):
+        for i in range(3):
             r = session.post(f"{api_url}/trips",
                              json={"destination": f"T{i}", "start_date": "2026-09-01", "end_date": "2026-09-05"},
                              headers=h)
             assert r.status_code == 200, r.text
-        # 3rd trip rejected with 402
-        r = session.post(f"{api_url}/trips",
-                         json={"destination": "T3", "start_date": "2026-09-01", "end_date": "2026-09-05"},
-                         headers=h)
-        assert r.status_code == 402, r.text
-        detail = r.json().get("detail", "")
-        assert "Free tier" in detail and "Pro" in detail, f"Bad detail: {detail}"
-
-        # Upgrade to Pro
-        r = session.post(f"{api_url}/me/pro", headers=h)
-        assert r.status_code == 200
-        assert r.json()["is_pro"] is True
-        # Now 3rd trip succeeds
-        r = session.post(f"{api_url}/trips",
-                         json={"destination": "T3", "start_date": "2026-09-01", "end_date": "2026-09-05"},
-                         headers=h)
-        assert r.status_code == 200, r.text
 
 
-# ============== PUBLISH REQUIRES PRO ==============
+# ============== V1 PUBLIC LAUNCH: PUBLISHING IS NOT PRO-GATED ==============
 class TestPublishProGate:
     def _nine_items(self):
-        return [{"name": f"i{i}", "category": ["top", "bottom", "layer"][i % 3],
+        slot_categories = ["top", "bottom", "layer", "bottom", "layer", "top", "layer", "top", "bottom"]
+        return [{"name": f"i{i}", "category": slot_categories[i],
                  "colors": [], "tags": []} for i in range(9)]
 
-    def test_publish_requires_pro(self, api_url, session):
+    def test_publish_allowed_when_pro_disabled(self, api_url, session):
         data = _register(api_url, session, f"TEST_pub_{uuid.uuid4().hex[:6]}@packr.app")
         h = _hdr(data["token"])
         payload = {"title": "TEST_t", "description": "d", "destination": "X",
                    "days": 3, "season": "Summer", "climate": "warm",
                    "items": self._nine_items()}
         r = session.post(f"{api_url}/templates", json=payload, headers=h)
-        assert r.status_code == 402, r.text
-        # Upgrade
-        session.post(f"{api_url}/me/pro", headers=h)
-        r = session.post(f"{api_url}/templates", json=payload, headers=h)
         assert r.status_code == 200, r.text
         assert r.json()["is_official"] is False
 
 
-# ============== /me/pro & /me/airlines ==============
+# ============== /me/pro DISABLED & /me/airlines AVAILABLE ==============
 class TestMeProAirlines:
-    def test_upgrade_downgrade(self, api_url, session):
+    def test_upgrade_downgrade_disabled_for_public_launch(self, api_url, session):
         data = _register(api_url, session, f"TEST_pro_{uuid.uuid4().hex[:6]}@packr.app")
         h = _hdr(data["token"])
         assert data["user"]["is_pro"] is False
 
         r = session.post(f"{api_url}/me/pro", headers=h)
-        assert r.status_code == 200
-        assert r.json()["is_pro"] is True
+        assert r.status_code == 404
 
         r = session.delete(f"{api_url}/me/pro", headers=h)
-        assert r.status_code == 200
-        assert r.json()["is_pro"] is False
+        assert r.status_code == 404
 
-    def test_add_airline_requires_pro(self, api_url, session):
+    def test_add_airline_allowed_when_pro_disabled(self, api_url, session):
         data = _register(api_url, session, f"TEST_air_{uuid.uuid4().hex[:6]}@packr.app")
         h = _hdr(data["token"])
-        # Free → 402
+        # Add an airline while Pro is disabled
         r = session.post(f"{api_url}/me/airlines",
                          json={"name": "TEST_Air", "max_kg": 8.0}, headers=h)
-        assert r.status_code == 402, r.text
+        assert r.status_code == 200, r.text
 
-        # Upgrade → succeeds
-        session.post(f"{api_url}/me/pro", headers=h)
+        # Add another airline profile
         r = session.post(f"{api_url}/me/airlines",
                          json={"name": "TEST_Ryanair", "max_kg": 10.0}, headers=h)
         assert r.status_code == 200, r.text

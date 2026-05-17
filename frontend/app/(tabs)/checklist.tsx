@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -17,6 +17,7 @@ import * as Haptics from 'expo-haptics';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
 import { api, WardrobeItem, Trip } from '../../src/lib/api';
+import { trackEvent } from '../../src/lib/analytics';
 
 const ESSENTIAL_DEFAULTS: { key: string; name: string; weight: number; category: string }[] = [
   { key: 'passport', name: 'Passport', weight: 0.05, category: 'documents' },
@@ -52,21 +53,14 @@ export default function Checklist() {
     return m;
   }, [wardrobe]);
 
-  if (!trip) {
-    return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-          <Text style={{ color: c.textSecondary }}>Create a trip first.</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  const gridItems = trip.grid
-    .map((id, i) => ({ id, i }))
-    .filter((x) => x.id) as { id: string; i: number }[];
+  const gridItems = trip
+    ? (trip.grid
+        .map((id, i) => ({ id, i }))
+        .filter((x) => x.id) as { id: string; i: number }[])
+    : [];
 
   const onToggle = async (key: string, checked: boolean) => {
+    if (!trip) return;
     Haptics.selectionAsync().catch(() => {});
     try {
       const r = await api.put(`/trips/${trip.id}/checklist`, {
@@ -78,6 +72,7 @@ export default function Checklist() {
   };
 
   const onRemoveExtra = async (id: string) => {
+    if (!trip) return;
     try {
       const r = await api.delete(`/trips/${trip.id}/extras/${id}`);
       upsertTrip(r.data);
@@ -92,28 +87,53 @@ export default function Checklist() {
   for (const g of gridItems) {
     const item = itemsById[g.id];
     if (!item) continue;
-    const key = `grid:${g.i}`;
+    const key = `grid:${g.id}`;
+    const legacyKey = `grid:${g.i}`;
+    const checked = !!(trip?.checklist_state[key] || trip?.checklist_state[legacyKey]);
     totalCount += 1;
-    if (trip.checklist_state[key]) {
-      totalWeight += item.weight_kg || 0;
-      checkedCount += 1;
-    }
+    totalWeight += item.weight_kg || 0;
+    if (checked) checkedCount += 1;
   }
 
-  const allEssentials = [
-    ...ESSENTIAL_DEFAULTS.map((d) => ({ key: `ess:${d.key}`, name: d.name, weight: d.weight, category: d.category, removable: false, eid: '' })),
-    ...trip.extras.map((e) => ({ key: `ext:${e.id}`, name: e.name, weight: e.weight_kg, category: e.category, removable: true, eid: e.id })),
-  ];
+  const allEssentials = trip
+    ? [
+        ...ESSENTIAL_DEFAULTS.map((d) => ({ key: `ess:${d.key}`, name: d.name, weight: d.weight, category: d.category, removable: false, eid: '' })),
+        ...trip.extras.map((e) => ({ key: `ext:${e.id}`, name: e.name, weight: e.weight_kg, category: e.category, removable: true, eid: e.id })),
+      ]
+    : [];
 
   for (const e of allEssentials) {
     totalCount += 1;
-    if (trip.checklist_state[e.key]) {
-      totalWeight += e.weight || 0;
+    totalWeight += e.weight || 0;
+    if (trip?.checklist_state[e.key]) {
       checkedCount += 1;
     }
   }
 
   const overLimit = totalWeight > carryOnLimitKg;
+  const categoryProgress = ['top', 'bottom', 'layer'].map((category) => {
+    const rows = gridItems
+      .map(({ id }) => itemsById[id])
+      .filter((item) => item?.category === category);
+    const done = rows.filter((item) => !!trip?.checklist_state[`grid:${item.id}`]).length;
+    return { category, done, total: rows.length };
+  });
+
+  useEffect(() => {
+    if (trip?.id && totalCount > 0 && checkedCount === totalCount) {
+      trackEvent('checklist_completed', { trip_id: trip.id, total_weight: totalWeight });
+    }
+  }, [checkedCount, totalCount, totalWeight, trip?.id]);
+
+  if (!trip) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <Text style={{ color: c.textSecondary }}>Create a trip first.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
@@ -163,6 +183,30 @@ export default function Checklist() {
           </Text>
         </View>
 
+        <View style={[styles.progressPanel, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+          {categoryProgress.map((item) => (
+            <View key={item.category} style={styles.progressLine}>
+              <Text style={{ color: c.textSecondary, fontSize: 11, fontWeight: '800', width: 70 }}>
+                {item.category.toUpperCase()}
+              </Text>
+              <View style={[styles.progressTrack, { backgroundColor: c.elevated }]}>
+                <View
+                  style={[
+                    styles.progressFill,
+                    {
+                      backgroundColor: c.accent,
+                      width: `${item.total ? (item.done / item.total) * 100 : 0}%`,
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={{ color: c.textTertiary, fontSize: 11, width: 34, textAlign: 'right' }}>
+                {item.done}/{item.total}
+              </Text>
+            </View>
+          ))}
+        </View>
+
         <View style={[styles.box, { borderColor: c.borderSubtle }]}>
           {gridItems.length === 0 && (
             <Text style={{ color: c.textTertiary, padding: 16 }}>Build the grid first.</Text>
@@ -170,8 +214,9 @@ export default function Checklist() {
           {gridItems.map(({ id, i }) => {
             const item = itemsById[id];
             if (!item) return null;
-            const key = `grid:${i}`;
-            const checked = !!trip.checklist_state[key];
+            const key = `grid:${id}`;
+            const legacyKey = `grid:${i}`;
+            const checked = !!(trip.checklist_state[key] || trip.checklist_state[legacyKey]);
             return (
               <CheckRow
                 key={key}
@@ -217,6 +262,15 @@ export default function Checklist() {
             );
           })}
         </View>
+
+        {overLimit && (
+          <View style={[styles.limitWarning, { borderColor: c.error, backgroundColor: c.error + '12' }]}>
+            <Ionicons name="warning-outline" size={17} color={c.error} />
+            <Text style={{ color: c.textPrimary, flex: 1, fontSize: 13 }}>
+              You are over the selected carry-on limit. Remove extras, swap heavier grid items, or choose another airline profile.
+            </Text>
+          </View>
+        )}
       </ScrollView>
 
       {/* Sticky weight bar */}
@@ -428,6 +482,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10, paddingVertical: 6,
   },
   box: { borderWidth: 1, borderRadius: 8, marginTop: 12, overflow: 'hidden' },
+  progressPanel: { borderWidth: 1, borderRadius: 8, padding: 14, marginTop: 12, gap: 10 },
+  progressLine: { gap: 6 },
+  progressTrack: { height: 5, borderRadius: 3, overflow: 'hidden' },
+  progressFill: { height: 5, borderRadius: 3 },
+  limitWarning: { borderWidth: 1, borderRadius: 8, padding: 14, marginTop: 12 },
   row: {
     flexDirection: 'row', alignItems: 'center', padding: 16, borderBottomWidth: 1,
   },

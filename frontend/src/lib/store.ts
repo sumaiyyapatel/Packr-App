@@ -1,6 +1,36 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api, TOKEN_KEY, User, Trip, WardrobeItem } from './api';
+import {
+  getCurrentFirebaseToken,
+  isFirebaseAuthConfigured,
+  loginWithFirebase,
+  loginWithGoogleIdToken,
+  loginWithNativeGoogle,
+  loginWithGooglePopup,
+  logoutFirebase,
+  registerWithFirebase,
+} from './firebaseAuth';
+
+const USER_CACHE_KEY = 'packr.user';
+const TRIPS_CACHE_KEY = 'packr.trips';
+const WARDROBE_CACHE_KEY = 'packr.wardrobe';
+const ONBOARDED_KEY = 'packr.onboarded';
+const SELECTED_TRIP_KEY = 'packr.selectedTripId';
+const SELECTED_AIRLINE_KEY = 'packr.airlineId';
+
+async function readJson<T>(key: string): Promise<T | null> {
+  try {
+    const raw = await AsyncStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeJson(key: string, value: unknown) {
+  AsyncStorage.setItem(key, JSON.stringify(value)).catch(() => {});
+}
 
 type State = {
   user: User | null;
@@ -15,6 +45,9 @@ type State = {
   hydrate: () => Promise<void>;
   register: (email: string, password: string, name?: string) => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
+  loginWithGoogle: (googleIdToken: string) => Promise<void>;
+  loginWithGoogleNative: () => Promise<void>;
+  loginWithGoogleWeb: () => Promise<void>;
   logout: () => Promise<void>;
   finishOnboarding: () => Promise<void>;
   setUser: (u: User) => void;
@@ -42,44 +75,149 @@ export const useStore = create<State>((set, get) => ({
   selectedAirlineId: null,
 
   hydrate: async () => {
-    const token = await AsyncStorage.getItem(TOKEN_KEY);
-    const onboarded = (await AsyncStorage.getItem('packr.onboarded')) === '1';
-    const selectedTripId = await AsyncStorage.getItem('packr.selectedTripId');
+    let token = await AsyncStorage.getItem(TOKEN_KEY);
+    const firebaseToken = await getCurrentFirebaseToken();
+    if (firebaseToken) {
+      token = firebaseToken;
+      await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+    }
+    const onboarded = (await AsyncStorage.getItem(ONBOARDED_KEY)) === '1';
+    const selectedTripId = await AsyncStorage.getItem(SELECTED_TRIP_KEY);
+    const selectedAirlineId = await AsyncStorage.getItem(SELECTED_AIRLINE_KEY);
+    const [cachedUser, cachedTrips, cachedWardrobe] = await Promise.all([
+      readJson<User>(USER_CACHE_KEY),
+      readJson<Trip[]>(TRIPS_CACHE_KEY),
+      readJson<WardrobeItem[]>(WARDROBE_CACHE_KEY),
+    ]);
     if (token) {
+      if (cachedUser || cachedTrips || cachedWardrobe) {
+        set({
+          user: cachedUser,
+          token,
+          onboarded,
+          selectedTripId,
+          selectedAirlineId,
+          trips: cachedTrips || [],
+          wardrobe: cachedWardrobe || [],
+          hydrated: true,
+        });
+      }
       try {
         const r = await api.get('/auth/me');
-        set({ user: r.data, token, onboarded, selectedTripId, hydrated: true });
+        writeJson(USER_CACHE_KEY, r.data);
+        set({ user: r.data, token, onboarded, selectedTripId, selectedAirlineId, hydrated: true });
         await get().refreshAll();
         return;
-      } catch {
-        await AsyncStorage.removeItem(TOKEN_KEY);
+      } catch (e: any) {
+        if (e?.response?.status === 401 || e?.response?.status === 403) {
+          await AsyncStorage.multiRemove([TOKEN_KEY, USER_CACHE_KEY]);
+        } else if (cachedUser) {
+          return;
+        }
       }
     }
-    set({ hydrated: true, onboarded, selectedTripId });
+    set({ hydrated: true, onboarded, selectedTripId, selectedAirlineId });
   },
 
   register: async (email, password, name) => {
+    if (isFirebaseAuthConfigured()) {
+      let firebaseToken: string | null = null;
+      try {
+        firebaseToken = await registerWithFirebase(email, password, name);
+      } catch {
+        // If Firebase auth fails in development, fall back to backend
+      }
+      if (firebaseToken) {
+        await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+        const r = await api.get('/auth/me');
+        writeJson(USER_CACHE_KEY, r.data);
+        set({ token: firebaseToken, user: r.data });
+        await get().refreshAll();
+        return;
+      }
+    }
     const r = await api.post('/auth/register', { email, password, name });
     await AsyncStorage.setItem(TOKEN_KEY, r.data.token);
+    writeJson(USER_CACHE_KEY, r.data.user);
     set({ token: r.data.token, user: r.data.user });
     await get().refreshAll();
   },
 
   login: async (email, password) => {
+    if (isFirebaseAuthConfigured()) {
+      let firebaseToken: string | null = null;
+      try {
+        firebaseToken = await loginWithFirebase(email, password);
+      } catch {
+        // Firebase login failed; fall back to backend auth
+      }
+      if (firebaseToken) {
+        await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+        const r = await api.get('/auth/me');
+        writeJson(USER_CACHE_KEY, r.data);
+        set({ token: firebaseToken, user: r.data });
+        await get().refreshAll();
+        return;
+      }
+    }
     const r = await api.post('/auth/login', { email, password });
     await AsyncStorage.setItem(TOKEN_KEY, r.data.token);
+    writeJson(USER_CACHE_KEY, r.data.user);
     set({ token: r.data.token, user: r.data.user });
     await get().refreshAll();
   },
 
+  loginWithGoogle: async (googleIdToken) => {
+    try {
+      const firebaseToken = await loginWithGoogleIdToken(googleIdToken);
+      if (!firebaseToken) throw new Error('Firebase Google sign-in is not configured');
+      await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+      const r = await api.get('/auth/me');
+      writeJson(USER_CACHE_KEY, r.data);
+      set({ token: firebaseToken, user: r.data });
+      await get().refreshAll();
+      return;
+    } catch (err) {
+      // If Google/Firebase auth fails, surface an error to caller
+      throw err;
+    }
+  },
+
+  loginWithGoogleWeb: async () => {
+    const firebaseToken = await loginWithGooglePopup();
+    if (!firebaseToken) throw new Error('Firebase Google sign-in is not configured');
+    await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+    const r = await api.get('/auth/me');
+    writeJson(USER_CACHE_KEY, r.data);
+    set({ token: firebaseToken, user: r.data });
+    await get().refreshAll();
+  },
+
+  loginWithGoogleNative: async () => {
+    const firebaseToken = await loginWithNativeGoogle();
+    if (!firebaseToken) throw new Error('Native Google sign-in is not configured for this platform');
+    await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+    const r = await api.get('/auth/me');
+    writeJson(USER_CACHE_KEY, r.data);
+    set({ token: firebaseToken, user: r.data });
+    await get().refreshAll();
+  },
+
   logout: async () => {
-    await AsyncStorage.removeItem(TOKEN_KEY);
-    await AsyncStorage.removeItem('packr.selectedTripId');
-    set({ token: null, user: null, trips: [], wardrobe: [], selectedTripId: null });
+    await logoutFirebase().catch(() => {});
+    await AsyncStorage.multiRemove([
+      TOKEN_KEY,
+      USER_CACHE_KEY,
+      TRIPS_CACHE_KEY,
+      WARDROBE_CACHE_KEY,
+      SELECTED_TRIP_KEY,
+      SELECTED_AIRLINE_KEY,
+    ]);
+    set({ token: null, user: null, trips: [], wardrobe: [], selectedTripId: null, selectedAirlineId: null });
   },
 
   finishOnboarding: async () => {
-    await AsyncStorage.setItem('packr.onboarded', '1');
+    await AsyncStorage.setItem(ONBOARDED_KEY, '1');
     set({ onboarded: true });
   },
 
@@ -91,47 +229,76 @@ export const useStore = create<State>((set, get) => ({
     const r = await api.get('/trips');
     const trips: Trip[] = r.data;
     let { selectedTripId } = get();
+    if (selectedTripId && !trips.some((trip) => trip.id === selectedTripId)) {
+      selectedTripId = trips[0]?.id || null;
+    }
     if (!selectedTripId && trips.length) {
       selectedTripId = trips[0].id;
-      await AsyncStorage.setItem('packr.selectedTripId', selectedTripId);
     }
+    if (selectedTripId) await AsyncStorage.setItem(SELECTED_TRIP_KEY, selectedTripId);
+    else await AsyncStorage.removeItem(SELECTED_TRIP_KEY);
+    writeJson(TRIPS_CACHE_KEY, trips);
     set({ trips, selectedTripId });
   },
 
   refreshWardrobe: async () => {
     const r = await api.get('/wardrobe');
+    writeJson(WARDROBE_CACHE_KEY, r.data);
     set({ wardrobe: r.data });
   },
 
   setSelectedTrip: (id) => {
     set({ selectedTripId: id });
-    if (id) AsyncStorage.setItem('packr.selectedTripId', id);
-    else AsyncStorage.removeItem('packr.selectedTripId');
+    if (id) AsyncStorage.setItem(SELECTED_TRIP_KEY, id);
+    else AsyncStorage.removeItem(SELECTED_TRIP_KEY);
   },
 
   setSelectedAirline: (id) => {
     set({ selectedAirlineId: id });
-    if (id) AsyncStorage.setItem('packr.airlineId', id);
-    else AsyncStorage.removeItem('packr.airlineId');
+    if (id) AsyncStorage.setItem(SELECTED_AIRLINE_KEY, id);
+    else AsyncStorage.removeItem(SELECTED_AIRLINE_KEY);
   },
 
-  setUser: (u) => set({ user: u }),
+  setUser: (u) => {
+    writeJson(USER_CACHE_KEY, u);
+    set({ user: u });
+  },
 
   upsertTrip: (t) => {
     const trips = get().trips.filter((x) => x.id !== t.id);
-    set({ trips: [...trips, t].sort((a, b) => a.start_date.localeCompare(b.start_date)) });
+    const next = [...trips, t].sort((a, b) => a.start_date.localeCompare(b.start_date));
+    writeJson(TRIPS_CACHE_KEY, next);
+    set({ trips: next });
   },
 
   removeTrip: (id) => {
-    set({ trips: get().trips.filter((x) => x.id !== id) });
+    const next = get().trips.filter((x) => x.id !== id);
+    writeJson(TRIPS_CACHE_KEY, next);
+    set({ trips: next });
   },
 
   upsertWardrobeItem: (i) => {
     const w = get().wardrobe.filter((x) => x.id !== i.id);
-    set({ wardrobe: [i, ...w] });
+    const next = [i, ...w];
+    writeJson(WARDROBE_CACHE_KEY, next);
+    set({ wardrobe: next });
   },
 
   removeWardrobeItem: (id) => {
-    set({ wardrobe: get().wardrobe.filter((x) => x.id !== id) });
+    const next = get().wardrobe.filter((x) => x.id !== id);
+    const trips = get().trips.map((trip) => ({
+      ...trip,
+      grid: trip.grid.map((slot) => (slot === id ? null : slot)),
+      favorites: trip.favorites.filter((favorite) => typeof favorite !== 'string' || !favorite.includes(id)),
+      occasion_tags: Object.fromEntries(
+        Object.entries(trip.occasion_tags).filter(([key]) => !key.includes(id))
+      ),
+      checklist_state: Object.fromEntries(
+        Object.entries(trip.checklist_state).filter(([key]) => key !== `grid:${id}`)
+      ),
+    }));
+    writeJson(WARDROBE_CACHE_KEY, next);
+    writeJson(TRIPS_CACHE_KEY, trips);
+    set({ wardrobe: next, trips });
   },
 }));

@@ -88,6 +88,48 @@ class TestWardrobe:
         r = session.post(f"{api_url}/wardrobe", json=payload, headers=test_user_headers)
         assert r.status_code == 400
 
+    def test_update_wardrobe_item_and_clear_invalid_grid_slot(self, api_url, session, test_user_headers):
+        created = []
+        for slot, cat in enumerate(["top", "bottom", "layer", "bottom", "layer", "top", "layer", "top", "bottom"]):
+            r = session.post(
+                f"{api_url}/wardrobe",
+                json={"name": f"TEST_Edit_{slot}", "category": cat, "image": "", "tags": [" Casual ", "#Formal"]},
+                headers=test_user_headers,
+            )
+            assert r.status_code == 200, r.text
+            created.append(r.json())
+
+        r = session.post(
+            f"{api_url}/trips",
+            json={"destination": "TEST_EditGrid", "start_date": "2026-09-01", "end_date": "2026-09-04"},
+            headers=test_user_headers,
+        )
+        assert r.status_code == 200, r.text
+        trip = r.json()
+        grid = [item["id"] for item in created]
+        r = session.put(f"{api_url}/trips/{trip['id']}/grid", json={"grid": grid}, headers=test_user_headers)
+        assert r.status_code == 200, r.text
+
+        target = created[0]
+        r = session.put(
+            f"{api_url}/wardrobe/{target['id']}",
+            json={"name": "TEST_Edited Layer", "category": "layer", "tags": ["Rain", "rain", "#Work"]},
+            headers=test_user_headers,
+        )
+        assert r.status_code == 200, r.text
+        item = r.json()
+        assert item["name"] == "TEST_Edited Layer"
+        assert item["category"] == "layer"
+        assert item["tags"] == ["rain", "work"]
+
+        r = session.get(f"{api_url}/trips/{trip['id']}", headers=test_user_headers)
+        assert r.status_code == 200
+        assert r.json()["grid"][0] is None
+
+        for item in created:
+            session.delete(f"{api_url}/wardrobe/{item['id']}", headers=test_user_headers)
+        session.delete(f"{api_url}/trips/{trip['id']}", headers=test_user_headers)
+
     def test_delete_wardrobe_removes_from_grid(self, api_url, session, test_user_headers):
         # Create 9 items (3 per category) and assign to grid
         ids = {"top": [], "bottom": [], "layer": []}
@@ -103,7 +145,11 @@ class TestWardrobe:
         assert r.status_code == 200
         trip = r.json()
         trip_id = trip["id"]
-        grid = ids["top"] + ids["bottom"] + ids["layer"]
+        grid = [
+            ids["top"][0], ids["bottom"][0], ids["layer"][0],
+            ids["bottom"][1], ids["layer"][1], ids["top"][1],
+            ids["layer"][2], ids["top"][2], ids["bottom"][2],
+        ]
         r = session.put(f"{api_url}/trips/{trip_id}/grid", json={"grid": grid}, headers=test_user_headers)
         assert r.status_code == 200
         assert r.json()["grid"] == grid

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,8 @@ import {
 import { useRouter } from 'expo-router';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api } from '../../src/lib/api';
+import { api, getApiErrorMessage } from '../../src/lib/api';
+import { trackEvent } from '../../src/lib/analytics';
 
 type GeoResult = {
   name: string;
@@ -37,24 +38,89 @@ export default function TripCreate() {
   const [endDate, setEndDate] = useState('');
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [weatherPreview, setWeatherPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const search = async (q: string) => {
-    setDestination(q);
-    setPicked(null);
-    if (q.length < 2) {
+  useEffect(() => {
+    if (picked || destination.trim().length < 2) {
       setResults([]);
       return;
     }
-    setSearching(true);
-    try {
-      const r = await api.get('/geocode', { params: { q } });
-      setResults(r.data.results || []);
-    } catch {
-      setResults([]);
-    } finally {
-      setSearching(false);
+    const timer = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const r = await api.get('/geocode', { params: { q: destination.trim() } });
+        setResults(r.data.results || []);
+      } catch {
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [destination, picked]);
+
+  useEffect(() => {
+    if (!picked || !isValidDate(startDate) || !isValidDate(endDate) || endDate < startDate) {
+      setWeatherPreview(null);
+      return;
     }
+    let alive = true;
+    (async () => {
+      try {
+        const r = await api.get('/weather', {
+          params: {
+            latitude: picked.latitude,
+            longitude: picked.longitude,
+            start_date: startDate,
+            end_date: endDate,
+          },
+        });
+        const daily = r.data?.daily;
+        const max = daily?.temperature_2m_max?.[0];
+        const min = daily?.temperature_2m_min?.[0];
+        const rain = daily?.precipitation_sum?.[0];
+        if (alive && max != null && min != null) {
+          setWeatherPreview(`${Math.round(min)}C to ${Math.round(max)}C, rain ${Number(rain || 0).toFixed(1)}mm`);
+        }
+      } catch {
+        if (alive) setWeatherPreview(null);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [picked, startDate, endDate]);
+
+  const showDatePicker = (field: 'start' | 'end') => {
+    const current = field === 'start' ? startDate : endDate;
+    const value = isValidDate(current) ? new Date(`${current}T00:00:00`) : new Date();
+    (async () => {
+      try {
+        const mod = await import('@react-native-community/datetimepicker');
+        const picker = (mod as any).DateTimePickerAndroid ?? (mod as any).default?.DateTimePickerAndroid;
+        if (!picker || typeof picker.open !== 'function') {
+          throw new Error('native date picker not available');
+        }
+        picker.open({
+          value,
+          mode: 'date',
+          onChange: (_event: any, selected: Date | undefined) => {
+            if (!selected) return;
+            const next = formatDate(selected);
+            if (field === 'start') setStartDate(next);
+            else setEndDate(next);
+          },
+        });
+      } catch {
+        // Fallback: simple prompt for YYYY-MM-DD
+        const input = prompt('Enter date (YYYY-MM-DD)', value.toISOString().slice(0, 10));
+        if (input && isValidDate(input)) {
+          if (field === 'start') setStartDate(input);
+          else setEndDate(input);
+        }
+      }
+    })();
   };
 
   const onCreate = async () => {
@@ -78,14 +144,13 @@ export default function TripCreate() {
       const r = await api.post('/trips', payload);
       upsertTrip(r.data);
       setSelectedTrip(r.data.id);
+      trackEvent('trip_created', { has_weather_location: Boolean(picked) });
       router.replace('/(tabs)');
-    } catch (e: any) {
-      const status = e?.response?.status;
-      if (status === 402) {
-        setErr(e?.response?.data?.detail || 'Free tier capped at 2 trips. Upgrade to Pro.');
-      } else {
-        setErr(e?.response?.data?.detail || 'Failed to create trip');
-      }
+    } catch (e: unknown) {
+      const status = (e as { response?: { status?: number } }).response?.status;
+      const fallback =
+        status === 402 ? 'Trip limit reached for this account.' : 'Failed to create trip';
+      setErr(getApiErrorMessage(e, fallback));
     } finally {
       setLoading(false);
     }
@@ -97,7 +162,7 @@ export default function TripCreate() {
       style={{ flex: 1, backgroundColor: c.bg }}
     >
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        <Text style={[styles.kicker, { color: c.accent }]}>STEP 02 · YOUR FIRST TRIP</Text>
+        <Text style={[styles.kicker, { color: c.accent }]}>STEP 02 - YOUR FIRST TRIP</Text>
         <Text style={[styles.h1, { color: c.textPrimary }]}>Where are you</Text>
         <Text style={[styles.h1, { color: c.textPrimary }]}>going?</Text>
 
@@ -106,8 +171,11 @@ export default function TripCreate() {
         <TextInput
           testID="trip-dest-input"
           value={destination}
-          onChangeText={search}
-          placeholder="Tokyo, Lisbon, Mumbai…"
+          onChangeText={(value) => {
+            setDestination(value);
+            setPicked(null);
+          }}
+          placeholder="Tokyo, Lisbon, Mumbai"
           placeholderTextColor={c.textTertiary}
           style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive }]}
         />
@@ -142,29 +210,36 @@ export default function TripCreate() {
         <View style={{ flexDirection: 'row', gap: 12 }}>
           <View style={{ flex: 1 }}>
             <Text style={[styles.label, { color: c.textTertiary }]}>START</Text>
-            <TextInput
+            <Pressable
               testID="trip-start-input"
-              value={startDate}
-              onChangeText={setStartDate}
-              placeholder="2026-04-01"
-              placeholderTextColor={c.textTertiary}
-              autoCapitalize="none"
-              style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive }]}
-            />
+              onPress={() => showDatePicker('start')}
+              style={[styles.dateButton, { borderBottomColor: c.borderActive }]}
+            >
+              <Text style={{ color: startDate ? c.textPrimary : c.textTertiary, fontSize: 18 }}>
+                {startDate || 'Pick date'}
+              </Text>
+            </Pressable>
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[styles.label, { color: c.textTertiary }]}>END</Text>
-            <TextInput
+            <Pressable
               testID="trip-end-input"
-              value={endDate}
-              onChangeText={setEndDate}
-              placeholder="2026-04-08"
-              placeholderTextColor={c.textTertiary}
-              autoCapitalize="none"
-              style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive }]}
-            />
+              onPress={() => showDatePicker('end')}
+              style={[styles.dateButton, { borderBottomColor: c.borderActive }]}
+            >
+              <Text style={{ color: endDate ? c.textPrimary : c.textTertiary, fontSize: 18 }}>
+                {endDate || 'Pick date'}
+              </Text>
+            </Pressable>
           </View>
         </View>
+
+        {weatherPreview && (
+          <View style={[styles.weatherPreview, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+            <Text style={{ color: c.textPrimary, fontSize: 13, fontWeight: '700' }}>Weather preview</Text>
+            <Text style={{ color: c.textSecondary, fontSize: 13, marginTop: 4 }}>{weatherPreview}</Text>
+          </View>
+        )}
 
         {err && <Text style={[styles.error, { color: c.error }]}>{err}</Text>}
 
@@ -191,7 +266,7 @@ export default function TripCreate() {
             onPress={() => router.replace('/(tabs)')}
             style={{ paddingVertical: 12, alignItems: 'center', marginTop: 8 }}
           >
-            <Text style={{ color: c.textSecondary, fontSize: 14 }}>Skip — go to dashboard</Text>
+            <Text style={{ color: c.textSecondary, fontSize: 14 }}>Skip - go to dashboard</Text>
           </Pressable>
         )}
       </ScrollView>
@@ -207,12 +282,18 @@ function isValidDate(s: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
+function formatDate(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
 const styles = StyleSheet.create({
   container: { flexGrow: 1, padding: 24, paddingTop: 80, paddingBottom: 48 },
   kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
   h1: { fontSize: 38, fontWeight: '700', letterSpacing: -1.5, lineHeight: 44 },
   label: { fontSize: 11, letterSpacing: 1.5, marginBottom: 8, marginTop: 8 },
   input: { fontSize: 18, borderBottomWidth: 1, paddingVertical: 8 },
+  dateButton: { borderBottomWidth: 1, minHeight: 42, justifyContent: 'center', paddingVertical: 10 },
+  weatherPreview: { borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 16 },
   resultBox: { marginTop: 8, borderWidth: 1, borderRadius: 8, overflow: 'hidden' },
   resultRow: { padding: 12, borderBottomWidth: 1 },
   btn: { paddingVertical: 16, borderRadius: 4, alignItems: 'center' },

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -11,17 +11,28 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
+import { getApiErrorMessage } from '../../src/lib/api';
+import { useGoogleIdTokenAuth } from '../../src/lib/useGoogleIdTokenAuth';
 
 export default function Register() {
   const { c } = useTheme();
   const router = useRouter();
   const register = useStore((s) => s.register);
+  const loginWithGoogle = useStore((s) => s.loginWithGoogle);
+  const loginWithGoogleWeb = useStore((s) => s.loginWithGoogleWeb);
+  const loginWithGoogleNative = useStore((s) => s.loginWithGoogleNative);
+  const googleAuth = useGoogleIdTokenAuth();
+  const usesFirebasePopup = Platform.OS === 'web';
+  const usesNativeGoogle = Platform.OS === 'android';
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [lastGoogleToken, setLastGoogleToken] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   const onSubmit = async () => {
@@ -33,10 +44,71 @@ export default function Register() {
     setLoading(true);
     try {
       await register(email.trim(), password, name.trim() || undefined);
-    } catch (e: any) {
-      setErr(e?.response?.data?.detail || 'Registration failed');
+    } catch (e: unknown) {
+      setErr(getApiErrorMessage(e, 'Registration failed'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!googleLoading || googleAuth.response?.type !== 'success') return;
+    const idToken = googleAuth.response.params.id_token || googleAuth.response.authentication?.idToken;
+    if (!idToken) {
+      setErr('Google did not return an ID token');
+      setGoogleLoading(false);
+      return;
+    }
+    if (idToken === lastGoogleToken) return;
+    setLastGoogleToken(idToken);
+    loginWithGoogle(idToken)
+      .catch((e: unknown) => setErr(getApiErrorMessage(e, 'Google sign-in failed')))
+      .finally(() => setGoogleLoading(false));
+  }, [googleAuth.response, googleLoading, lastGoogleToken, loginWithGoogle]);
+
+  const onGoogleSubmit = async () => {
+    setErr(null);
+    if (!googleAuth.configured) {
+      setErr('Add your Google client ID first');
+      return;
+    }
+    if (usesFirebasePopup) {
+      setGoogleLoading(true);
+      try {
+        await loginWithGoogleWeb();
+      } catch (e: unknown) {
+        setErr(getApiErrorMessage(e, 'Google sign-in failed'));
+      } finally {
+        setGoogleLoading(false);
+      }
+      return;
+    }
+    if (usesNativeGoogle) {
+      setGoogleLoading(true);
+      try {
+        await loginWithGoogleNative();
+      } catch (e: unknown) {
+        setErr(getApiErrorMessage(e, 'Google sign-in failed'));
+      } finally {
+        setGoogleLoading(false);
+      }
+      return;
+    }
+    if (!googleAuth.request) {
+      setErr('Google sign-in is not ready yet');
+      return;
+    }
+    setGoogleLoading(true);
+    try {
+      const result = await googleAuth.promptAsync();
+      if (result.type !== 'success') {
+        const detail = result.type === 'error' ? (result.params?.error_description || result.params?.error) : null;
+        if (detail) setErr(detail);
+        setGoogleLoading(false);
+      }
+    } catch (e: unknown) {
+      setErr(getApiErrorMessage(e, 'Google sign-in failed'));
+      setGoogleLoading(false);
     }
   };
 
@@ -109,6 +181,37 @@ export default function Register() {
           )}
         </Pressable>
 
+        <View style={{ height: 12 }} />
+        <Pressable
+          testID="register-google-button"
+          onPress={onGoogleSubmit}
+          disabled={
+            loading ||
+            googleLoading ||
+            !googleAuth.configured ||
+            (!usesFirebasePopup && !usesNativeGoogle && !googleAuth.request)
+          }
+          style={({ pressed }) => [
+            styles.oauthBtn,
+            { borderColor: c.borderActive, opacity: pressed ? 0.85 : 1 },
+            (loading ||
+              googleLoading ||
+              !googleAuth.configured ||
+              (!usesFirebasePopup && !usesNativeGoogle && !googleAuth.request)) && { opacity: 0.5 },
+          ]}
+        >
+          {googleLoading ? (
+            <ActivityIndicator color={c.textPrimary} />
+          ) : (
+            <>
+              <Ionicons name="logo-google" size={18} color={c.textPrimary} />
+              <Text style={[styles.oauthText, { color: c.textPrimary }]}>
+                {googleAuth.configured ? 'Continue with Google' : 'Google Setup Pending'}
+              </Text>
+            </>
+          )}
+        </Pressable>
+
         <View style={{ height: 16 }} />
         <Pressable
           testID="register-go-login-button"
@@ -134,6 +237,16 @@ const styles = StyleSheet.create({
   input: { fontSize: 18, borderBottomWidth: 1, paddingVertical: 8 },
   btn: { paddingVertical: 16, borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
   btnText: { fontSize: 16, fontWeight: '600', letterSpacing: 0.5 },
+  oauthBtn: {
+    minHeight: 50,
+    borderWidth: 1,
+    borderRadius: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
+  oauthText: { fontSize: 15, fontWeight: '600' },
   linkBtn: { alignItems: 'center', paddingVertical: 8 },
   link: { fontSize: 14 },
   error: { marginTop: 12, fontSize: 13 },

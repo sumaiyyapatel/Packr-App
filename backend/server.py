@@ -1,4 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -7,30 +8,108 @@ import os
 import logging
 import io
 import base64
+import re
+from collections import deque
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union, Literal
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
+from urllib.parse import unquote, urlparse
 import bcrypt
 import jwt
 import httpx
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
+from pymongo.errors import DuplicateKeyError
+
+try:
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth, credentials as firebase_credentials
+except Exception:
+    firebase_admin = None
+    firebase_auth = None
+    firebase_credentials = None
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+env_path = ROOT_DIR / '.env'
+if env_path.exists():
+    load_dotenv(env_path)
+else:
+    load_dotenv()  # Try loading from system environment
 
-mongo_url = os.environ['MONGO_URL']
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() in ('1', 'true', 'yes', 'on')
+
+APP_ENV = os.environ.get('PACKR_ENV') or os.environ.get('APP_ENV') or os.environ.get('ENVIRONMENT') or 'development'
+IS_PRODUCTION = APP_ENV.lower() in ('prod', 'production')
+FEATURE_PRO_ENABLED = env_bool('FEATURE_PRO_ENABLED', False)
+UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', ROOT_DIR / 'uploads'))
+PUBLIC_UPLOAD_BASE_URL = os.environ.get('PUBLIC_UPLOAD_BASE_URL', '').rstrip('/')
+
+mongo_url = os.environ.get('MONGO_URL')
+if IS_PRODUCTION and not mongo_url:
+    raise ValueError('MONGO_URL environment variable must be set in production')
+mongo_url = mongo_url or 'mongodb://localhost:27017'
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db_name = os.environ.get('DB_NAME')
+if IS_PRODUCTION and not db_name:
+    raise ValueError('DB_NAME environment variable must be set in production')
+db = client[db_name or 'test_database']
 
-JWT_SECRET = os.environ.get('JWT_SECRET', 'packr-dev-secret-change-in-prod')
+JWT_SECRET = os.environ.get('JWT_SECRET')
+if IS_PRODUCTION and not JWT_SECRET:
+    raise ValueError('JWT_SECRET environment variable must be set in production')
+JWT_SECRET = JWT_SECRET or 'packr-dev-secret-change-in-prod'
 JWT_ALG = 'HS256'
 JWT_EXPIRE_DAYS = 30
+FIREBASE_AUTH_STRICT = os.environ.get('FIREBASE_AUTH_STRICT', '').lower() in ('1', 'true', 'yes')
+if IS_PRODUCTION and not FIREBASE_AUTH_STRICT:
+    raise ValueError('FIREBASE_AUTH_STRICT=1 is required in production')
+FIREBASE_AUTH_READY = False
+
+CORS_ORIGINS_RAW = os.environ.get('CORS_ORIGINS', '')
+if IS_PRODUCTION and (not CORS_ORIGINS_RAW or CORS_ORIGINS_RAW.strip() == '*'):
+    raise ValueError('CORS_ORIGINS must list explicit HTTPS origins in production')
+CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_RAW.split(',') if origin.strip()] or ['*']
+if IS_PRODUCTION and any(not origin.startswith('https://') for origin in CORS_ORIGINS):
+    raise ValueError('CORS_ORIGINS must use HTTPS origins in production')
 
 app = FastAPI(title="Packr API")
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
+
+def init_firebase_auth() -> None:
+    global FIREBASE_AUTH_READY
+    if firebase_admin is None or firebase_auth is None:
+        return
+    if firebase_admin._apps:
+        FIREBASE_AUTH_READY = True
+        return
+    project_id = os.environ.get('FIREBASE_PROJECT_ID')
+    creds_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+    creds_path = os.environ.get('FIREBASE_CREDENTIALS_PATH')
+    try:
+        cred = None
+        if creds_json:
+            import json
+            cred = firebase_credentials.Certificate(json.loads(creds_json))
+        elif creds_path:
+            cred = firebase_credentials.Certificate(creds_path)
+        if cred:
+            firebase_admin.initialize_app(cred, {'projectId': project_id} if project_id else None)
+            FIREBASE_AUTH_READY = True
+        elif project_id:
+            firebase_admin.initialize_app(options={'projectId': project_id})
+            FIREBASE_AUTH_READY = True
+    except Exception as e:
+        logging.getLogger(__name__).warning(f'Firebase Auth init skipped: {e}')
+
+init_firebase_auth()
+if IS_PRODUCTION and FIREBASE_AUTH_STRICT and not FIREBASE_AUTH_READY:
+    raise ValueError('Firebase Auth credentials must be configured in production')
 
 # ========== MODELS ==========
 class UserRegister(BaseModel):
@@ -67,6 +146,14 @@ class WardrobeItem(WardrobeItemCreate):
     user_id: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+class WardrobeItemUpdate(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    image: Optional[str] = None
+    colors: Optional[List[str]] = None
+    weight_kg: Optional[float] = None
+    tags: Optional[List[str]] = None
+
 class TripCreate(BaseModel):
     destination: str
     start_date: str  # ISO date
@@ -83,31 +170,111 @@ class Trip(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     grid: List[Optional[str]] = Field(default_factory=lambda: [None] * 9)  # 9 wardrobe item ids
-    favorites: List[int] = []  # outfit indices favorited
-    occasion_tags: Dict[str, str] = Field(default_factory=dict)  # outfit_idx -> occasion
+    favorites: List[Union[int, str]] = Field(default_factory=list)  # outfit keys favorited
+    occasion_tags: Dict[str, str] = Field(default_factory=dict)  # outfit key -> occasion
     checklist_state: Dict[str, bool] = Field(default_factory=dict)  # itemKey -> checked
     extras: List[Dict[str, Any]] = Field(default_factory=list)  # essentials added
+    outfit_plan: Dict[str, str] = Field(default_factory=dict)  # ISO date -> outfit key
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class GridUpdate(BaseModel):
     grid: List[Optional[str]]
 
 class FavoriteUpdate(BaseModel):
-    outfit_index: int
+    outfit_index: Optional[int] = None
+    outfit_key: Optional[str] = None
     is_favorite: bool
 
 class OccasionUpdate(BaseModel):
-    outfit_index: int
+    outfit_index: Optional[int] = None
+    outfit_key: Optional[str] = None
     occasion: str
 
 class ChecklistUpdate(BaseModel):
     item_key: str
     checked: bool
 
+class OutfitPlanUpdate(BaseModel):
+    date: str
+    outfit_key: Optional[str] = None
+
 class ExtraItem(BaseModel):
     name: str
     category: str  # 'toiletries' | 'documents' | 'chargers' | 'other'
     weight_kg: float = 0.1
+
+class CommunityPostCreate(BaseModel):
+    trip_id: str
+    title: Optional[str] = Field(default=None, max_length=80)
+    caption: str = Field(default='', max_length=220)
+    visibility: Literal['public', 'followers', 'private'] = 'public'
+
+class CommunityCommentCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+
+class CommunityReportCreate(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+class CommunityComment(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    post_id: str
+    user_id: str
+    user_name: str
+    text: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class CommunityPost(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    author_id: str
+    author_name: str
+    trip_id: str
+    title: str
+    caption: str = ''
+    visibility: Literal['public', 'followers', 'private'] = 'public'
+    destination: str
+    start_date: str
+    end_date: str
+    days: int
+    image_url: str = ''
+    image_width: int = 0
+    image_height: int = 0
+    dominant_colors: List[str] = Field(default_factory=list)
+    grid: List[Optional[str]] = Field(default_factory=list)
+    items_snapshot: List[Dict[str, Any]] = Field(default_factory=list)
+    likes_count: int = 0
+    comments_count: int = 0
+    saves_count: int = 0
+    is_liked: bool = False
+    is_saved: bool = False
+    is_following_author: bool = False
+    latest_comments: List[CommunityComment] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class SocialProfile(BaseModel):
+    id: str
+    name: Optional[str] = None
+    is_following: bool = False
+    is_friend: bool = False
+    followers_count: int = 0
+    following_count: int = 0
+    posts_count: int = 0
+
+class UploadImageRequest(BaseModel):
+    image: str
+
+class UploadImageResponse(BaseModel):
+    url: str
+    width: int
+    height: int
+    content_type: str
+
+class AnalyticsEventCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    properties: Dict[str, Any] = Field(default_factory=dict)
+
+class FeedbackCreate(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    context: Optional[str] = Field(default=None, max_length=200)
 
 # ========== AUTH HELPERS ==========
 def hash_password(pw: str) -> str:
@@ -127,9 +294,53 @@ def create_token(user_id: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
+def display_name(user: dict) -> str:
+    name = (user.get('name') or '').strip()
+    if name:
+        return name
+    return (user.get('email') or 'traveller').split('@')[0]
+
+async def get_or_create_firebase_user(decoded: dict) -> dict:
+    uid = decoded.get('uid') or decoded.get('sub')
+    if not uid:
+        raise HTTPException(401, 'Invalid Firebase token')
+    email = (decoded.get('email') or f'{uid}@firebase.local').lower()
+    user = await db.users.find_one({'id': uid}, {'_id': 0})
+    if user:
+        updates = {}
+        if user.get('email') != email:
+            updates['email'] = email
+        if not user.get('airline_profiles'):
+            updates['airline_profiles'] = DEFAULT_AIRLINES
+        if updates:
+            await db.users.update_one({'id': uid}, {'$set': updates})
+            user = await db.users.find_one({'id': uid}, {'_id': 0})
+        return user
+
+    user_doc = {
+        'id': uid,
+        'email': email,
+        'password_hash': '',
+        'name': decoded.get('name'),
+        'is_pro': False,
+        'airline_profiles': DEFAULT_AIRLINES,
+        'created_at': datetime.now(timezone.utc),
+    }
+    await db.users.insert_one(user_doc.copy())
+    return user_doc
+
 async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    token = creds.credentials
+    if FIREBASE_AUTH_READY and firebase_auth is not None:
+        try:
+            decoded = firebase_auth.verify_id_token(token)
+            return await get_or_create_firebase_user(decoded)
+        except Exception:
+            if FIREBASE_AUTH_STRICT:
+                raise HTTPException(401, 'Invalid Firebase token')
+
     try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALG])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
         user_id = payload.get('sub')
         if not user_id:
             raise HTTPException(401, 'Invalid token')
@@ -156,6 +367,267 @@ DEFAULT_AIRLINES: List[Dict[str, Any]] = [
     {'id': 'carry-on', 'name': 'Generic Carry-on', 'max_kg': 7.0},
     {'id': 'iata', 'name': 'IATA Standard', 'max_kg': 7.0},
 ]
+
+CATEGORY_BY_SLOT = ['top', 'bottom', 'layer', 'bottom', 'layer', 'top', 'layer', 'top', 'bottom']
+TOP_SLOTS = [0, 5, 7]
+BOTTOM_SLOTS = [1, 3, 8]
+LAYER_SLOTS = [2, 4, 6]
+
+def category_for_slot(slot: int) -> str:
+    return CATEGORY_BY_SLOT[slot]
+
+def validate_trip_dates(start_date: str, end_date: str) -> None:
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError:
+        raise HTTPException(400, 'Trip dates must use YYYY-MM-DD format')
+    if end < start:
+        raise HTTPException(400, 'Trip end date must be on or after start date')
+
+def outfit_identity_key(payload: Any, *, for_tag: bool = False) -> Union[int, str]:
+    key = getattr(payload, 'outfit_key', None)
+    if key:
+        return key
+    index = getattr(payload, 'outfit_index', None)
+    if index is None:
+        raise HTTPException(400, 'outfit_key or outfit_index is required')
+    if index < 0 or index > 26:
+        raise HTTPException(400, 'outfit_index must be between 0 and 26')
+    return str(index) if for_tag else index
+
+def valid_outfit_keys(grid: List[Optional[str]]) -> set:
+    if len(grid) != 9 or any(not grid[slot] for slot in TOP_SLOTS + BOTTOM_SLOTS + LAYER_SLOTS):
+        return set()
+    keys = set()
+    for top_slot in TOP_SLOTS:
+        for bottom_slot in BOTTOM_SLOTS:
+            for layer_slot in LAYER_SLOTS:
+                keys.add('|'.join([grid[top_slot], grid[bottom_slot], grid[layer_slot]]))
+    return keys
+
+def clean_outfit_state_for_grid(trip: dict, grid: List[Optional[str]]) -> Dict[str, Any]:
+    valid_keys = valid_outfit_keys(grid)
+    if not valid_keys:
+        return {'favorites': [], 'occasion_tags': {}, 'outfit_plan': {}}
+    favorites = [
+        fav for fav in trip.get('favorites', [])
+        if isinstance(fav, str) and fav in valid_keys
+    ]
+    occasion_tags = {
+        key: value
+        for key, value in (trip.get('occasion_tags') or {}).items()
+        if key in valid_keys
+    }
+    outfit_plan = {
+        day: key
+        for day, key in (trip.get('outfit_plan') or {}).items()
+        if key in valid_keys
+    }
+    return {'favorites': favorites, 'occasion_tags': occasion_tags, 'outfit_plan': outfit_plan}
+
+async def validate_grid(grid: List[Optional[str]], user_id: str) -> None:
+    if len(grid) != 9:
+        raise HTTPException(400, 'Grid must have exactly 9 slots')
+    item_ids = [item_id for item_id in grid if item_id]
+    if len(item_ids) != len(set(item_ids)):
+        raise HTTPException(400, 'Each grid item can only be used once')
+    if not item_ids:
+        return
+    items = await db.wardrobe.find(
+        {'user_id': user_id, 'id': {'$in': item_ids}},
+        {'_id': 0}
+    ).to_list(len(item_ids))
+    items_by_id = {item['id']: item for item in items}
+    missing = [item_id for item_id in item_ids if item_id not in items_by_id]
+    if missing:
+        raise HTTPException(400, 'Grid contains items outside your wardrobe')
+    for slot, item_id in enumerate(grid):
+        if not item_id:
+            continue
+        expected = category_for_slot(slot)
+        actual = items_by_id[item_id].get('category')
+        if actual != expected:
+            raise HTTPException(400, f'Slot {slot + 1} expects {expected}, found {actual}')
+
+def normalize_template_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    first_nine = list(items[:9])
+    if len(first_nine) != 9:
+        return first_nine
+    if [item.get('category') for item in first_nine] == CATEGORY_BY_SLOT:
+        return first_nine
+    buckets = {
+        'top': [item for item in first_nine if item.get('category') == 'top'],
+        'bottom': [item for item in first_nine if item.get('category') == 'bottom'],
+        'layer': [item for item in first_nine if item.get('category') == 'layer'],
+    }
+    if any(len(buckets[category]) < 3 for category in buckets):
+        return first_nine
+    arranged = []
+    used = {'top': 0, 'bottom': 0, 'layer': 0}
+    for category in CATEGORY_BY_SLOT:
+        arranged.append(buckets[category][used[category]])
+        used[category] += 1
+    return arranged
+
+def days_between(start_date: str, end_date: str) -> int:
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+        return max(1, (end - start).days + 1)
+    except ValueError:
+        return 1
+
+def clean_social_text(value: Optional[str], *, field: str, max_length: int, allow_empty: bool = True) -> str:
+    text = ' '.join((value or '').split())
+    if not text and not allow_empty:
+        raise HTTPException(400, f'{field} cannot be empty')
+    if len(text) > max_length:
+        raise HTTPException(400, f'{field} must be {max_length} characters or less')
+    return text
+
+def normalize_wardrobe_category(category: str) -> str:
+    value = (category or '').strip().lower()
+    if value not in ('top', 'bottom', 'layer'):
+        raise HTTPException(400, 'category must be top, bottom, or layer')
+    return value
+
+def normalize_wardrobe_tags(tags: Optional[List[str]]) -> List[str]:
+    normalized: List[str] = []
+    for raw in tags or []:
+        value = str(raw).strip().lower().replace('#', '')
+        value = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in value)
+        value = '-'.join(part for part in value.split('-') if part)[:24]
+        if value and value not in normalized:
+            normalized.append(value)
+        if len(normalized) >= 12:
+            break
+    return normalized
+
+def normalize_colors(colors: Optional[List[str]]) -> List[str]:
+    cleaned: List[str] = []
+    for color in colors or []:
+        value = str(color).strip()
+        if value and value not in cleaned:
+            cleaned.append(value[:32])
+        if len(cleaned) >= 6:
+            break
+    return cleaned
+
+async def clear_invalid_grid_slots_for_item(item_id: str, category: str, user_id: str) -> None:
+    affected = await db.trips.find({'user_id': user_id, 'grid': item_id}, {'_id': 0}).to_list(200)
+    for trip in affected:
+        grid = list(trip.get('grid') or [])
+        changed = False
+        for slot, current in enumerate(grid):
+            if current == item_id and category_for_slot(slot) != category:
+                grid[slot] = None
+                changed = True
+        if not changed:
+            continue
+        clean_state = clean_outfit_state_for_grid(trip, grid)
+        checklist_state = {
+            key: value
+            for key, value in (trip.get('checklist_state') or {}).items()
+            if key != f'grid:{item_id}'
+        }
+        await db.trips.update_one(
+            {'id': trip['id'], 'user_id': user_id},
+            {'$set': {**clean_state, 'grid': grid, 'checklist_state': checklist_state}},
+        )
+
+async def can_view_post(post: dict, user_id: str) -> bool:
+    if post.get('author_id') == user_id:
+        return True
+    visibility = post.get('visibility', 'public')
+    if visibility == 'public':
+        return True
+    if visibility == 'followers':
+        return bool(await db.follows.find_one({
+            'follower_id': user_id,
+            'following_id': post.get('author_id'),
+        }))
+    return False
+
+async def sync_post_counts(post: dict) -> dict:
+    post_id = post['id']
+    counts = {
+        'likes_count': await db.post_likes.count_documents({'post_id': post_id}),
+        'comments_count': await db.comments.count_documents({'post_id': post_id}),
+        'saves_count': await db.post_saves.count_documents({'post_id': post_id}),
+    }
+    if any(post.get(key, 0) != value for key, value in counts.items()):
+        await db.community_posts.update_one({'id': post_id}, {'$set': counts})
+        post = {**post, **counts}
+    return post
+
+async def enrich_post(post: dict, user_id: str) -> CommunityPost:
+    post = await sync_post_counts(post)
+    post_id = post['id']
+    author_id = post['author_id']
+    stored_post = {
+        key: value
+        for key, value in post.items()
+        if key not in {'_id', 'is_liked', 'is_saved', 'is_following_author', 'latest_comments'}
+    }
+    latest_comments = await db.comments.find(
+        {'post_id': post_id},
+        {'_id': 0}
+    ).sort('created_at', -1).to_list(3)
+    latest_comments.reverse()
+    is_liked = bool(await db.post_likes.find_one({'post_id': post_id, 'user_id': user_id}))
+    is_saved = bool(await db.post_saves.find_one({'post_id': post_id, 'user_id': user_id}))
+    is_following = bool(await db.follows.find_one({'follower_id': user_id, 'following_id': author_id}))
+    return CommunityPost(
+        **stored_post,
+        is_liked=is_liked,
+        is_saved=is_saved,
+        is_following_author=is_following,
+        latest_comments=[CommunityComment(**comment) for comment in latest_comments],
+    )
+
+async def get_visible_post(post_id: str, user_id: str) -> dict:
+    post = await db.community_posts.find_one({'id': post_id}, {'_id': 0})
+    if not post or not await can_view_post(post, user_id):
+        raise HTTPException(404, 'Community post not found')
+    return post
+
+async def upsert_social_edge(collection, filter_doc: dict, insert_doc: dict) -> bool:
+    try:
+        result = await collection.update_one(
+            filter_doc,
+            {'$setOnInsert': insert_doc},
+            upsert=True,
+        )
+        return bool(result.upserted_id)
+    except DuplicateKeyError:
+        return False
+
+async def visible_post_count_for_author(author_id: str, viewer_id: str) -> int:
+    if author_id == viewer_id:
+        return await db.community_posts.count_documents({'author_id': author_id})
+    is_following = bool(await db.follows.find_one({'follower_id': viewer_id, 'following_id': author_id}))
+    visibilities = ['public', 'followers'] if is_following else ['public']
+    return await db.community_posts.count_documents({
+        'author_id': author_id,
+        'visibility': {'$in': visibilities},
+    })
+
+async def social_profile_for(uid: str, viewer_id: str) -> SocialProfile:
+    user = await db.users.find_one({'id': uid}, {'_id': 0})
+    if not user:
+        raise HTTPException(404, 'User not found')
+    is_following = bool(await db.follows.find_one({'follower_id': viewer_id, 'following_id': uid}))
+    follows_back = bool(await db.follows.find_one({'follower_id': uid, 'following_id': viewer_id}))
+    return SocialProfile(
+        id=user['id'],
+        name=user.get('name'),
+        is_following=is_following,
+        is_friend=is_following and follows_back,
+        followers_count=await db.follows.count_documents({'following_id': uid}),
+        following_count=await db.follows.count_documents({'follower_id': uid}),
+        posts_count=await visible_post_count_for_author(uid, viewer_id),
+    )
 
 # ========== AUTH ROUTES ==========
 @api_router.post("/auth/register", response_model=TokenResponse)
@@ -204,22 +676,67 @@ async def list_wardrobe(user: dict = Depends(get_current_user)):
 
 @api_router.post("/wardrobe", response_model=WardrobeItem)
 async def create_wardrobe_item(payload: WardrobeItemCreate, user: dict = Depends(get_current_user)):
-    if payload.category not in ('top', 'bottom', 'layer'):
-        raise HTTPException(400, 'category must be top, bottom, or layer')
-    item = WardrobeItem(user_id=user['id'], **payload.dict())
+    data = payload.dict()
+    data['name'] = clean_social_text(data.get('name'), field='Name', max_length=80, allow_empty=False)
+    data['category'] = normalize_wardrobe_category(data.get('category', ''))
+    data['tags'] = normalize_wardrobe_tags(data.get('tags'))
+    data['colors'] = normalize_colors(data.get('colors'))
+    item = WardrobeItem(user_id=user['id'], **data)
     await db.wardrobe.insert_one(item.dict())
     return item
+
+@api_router.put("/wardrobe/{item_id}", response_model=WardrobeItem)
+async def update_wardrobe_item(
+    item_id: str,
+    payload: WardrobeItemUpdate,
+    user: dict = Depends(get_current_user),
+):
+    existing = await db.wardrobe.find_one({'id': item_id, 'user_id': user['id']}, {'_id': 0})
+    if not existing:
+        raise HTTPException(404, 'Item not found')
+
+    update: Dict[str, Any] = {}
+    if payload.name is not None:
+        update['name'] = clean_social_text(payload.name, field='Name', max_length=80, allow_empty=False)
+    if payload.category is not None:
+        update['category'] = normalize_wardrobe_category(payload.category)
+    if payload.image is not None:
+        update['image'] = payload.image
+    if payload.colors is not None:
+        update['colors'] = normalize_colors(payload.colors)
+    if payload.weight_kg is not None:
+        if payload.weight_kg < 0:
+            raise HTTPException(400, 'weight_kg must be 0 or greater')
+        update['weight_kg'] = min(payload.weight_kg, 50)
+    if payload.tags is not None:
+        update['tags'] = normalize_wardrobe_tags(payload.tags)
+
+    if update:
+        await db.wardrobe.update_one({'id': item_id, 'user_id': user['id']}, {'$set': update})
+        if update.get('category') and update['category'] != existing.get('category'):
+            await clear_invalid_grid_slots_for_item(item_id, update['category'], user['id'])
+
+    item = await db.wardrobe.find_one({'id': item_id, 'user_id': user['id']}, {'_id': 0})
+    return WardrobeItem(**item)
 
 @api_router.delete("/wardrobe/{item_id}")
 async def delete_wardrobe_item(item_id: str, user: dict = Depends(get_current_user)):
     res = await db.wardrobe.delete_one({'id': item_id, 'user_id': user['id']})
     if res.deleted_count == 0:
         raise HTTPException(404, 'Item not found')
-    # Remove from any trip grids
-    await db.trips.update_many(
-        {'user_id': user['id'], 'grid': item_id},
-        {'$set': {'grid.$': None}}
-    )
+    affected = await db.trips.find({'user_id': user['id'], 'grid': item_id}, {'_id': 0}).to_list(200)
+    for trip in affected:
+        grid = [None if slot == item_id else slot for slot in (trip.get('grid') or [])]
+        clean_state = clean_outfit_state_for_grid(trip, grid)
+        checklist_state = {
+            key: value
+            for key, value in (trip.get('checklist_state') or {}).items()
+            if key != f'grid:{item_id}'
+        }
+        await db.trips.update_one(
+            {'id': trip['id'], 'user_id': user['id']},
+            {'$set': {**clean_state, 'grid': grid, 'checklist_state': checklist_state}}
+        )
     return {'ok': True}
 
 # ========== TRIP ROUTES ==========
@@ -230,7 +747,8 @@ async def list_trips(user: dict = Depends(get_current_user)):
 
 @api_router.post("/trips", response_model=Trip)
 async def create_trip(payload: TripCreate, user: dict = Depends(get_current_user)):
-    if not user.get('is_pro', False):
+    validate_trip_dates(payload.start_date, payload.end_date)
+    if FEATURE_PRO_ENABLED and not user.get('is_pro', False):
         existing = await db.trips.count_documents({'user_id': user['id']})
         if existing >= FREE_TRIP_CAP:
             raise HTTPException(
@@ -257,11 +775,16 @@ async def delete_trip(trip_id: str, user: dict = Depends(get_current_user)):
 
 @api_router.put("/trips/{trip_id}/grid", response_model=Trip)
 async def update_grid(trip_id: str, payload: GridUpdate, user: dict = Depends(get_current_user)):
-    if len(payload.grid) != 9:
-        raise HTTPException(400, 'Grid must have exactly 9 slots')
+    await validate_grid(payload.grid, user['id'])
+    existing = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not existing:
+        raise HTTPException(404, 'Trip not found')
+    update_fields = {'grid': payload.grid}
+    if payload.grid != existing.get('grid'):
+        update_fields.update(clean_outfit_state_for_grid(existing, payload.grid))
     await db.trips.update_one(
         {'id': trip_id, 'user_id': user['id']},
-        {'$set': {'grid': payload.grid}}
+        {'$set': update_fields}
     )
     trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
     if not trip:
@@ -273,27 +796,58 @@ async def update_favorite(trip_id: str, payload: FavoriteUpdate, user: dict = De
     trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
     if not trip:
         raise HTTPException(404, 'Trip not found')
+    key = outfit_identity_key(payload)
+    valid_keys = valid_outfit_keys(trip.get('grid') or [])
+    if isinstance(key, str) and valid_keys and key not in valid_keys:
+        raise HTTPException(400, 'outfit_key does not match this grid')
     favs = set(trip.get('favorites', []))
     if payload.is_favorite:
-        favs.add(payload.outfit_index)
+        favs.add(key)
     else:
-        favs.discard(payload.outfit_index)
+        favs.discard(key)
     await db.trips.update_one(
         {'id': trip_id, 'user_id': user['id']},
-        {'$set': {'favorites': sorted(list(favs))}}
+        {'$set': {'favorites': sorted(list(favs), key=str)}}
     )
     trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
     return Trip(**trip)
 
 @api_router.put("/trips/{trip_id}/occasion", response_model=Trip)
 async def update_occasion(trip_id: str, payload: OccasionUpdate, user: dict = Depends(get_current_user)):
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    key = outfit_identity_key(payload, for_tag=True)
+    valid_keys = valid_outfit_keys(trip.get('grid') or [])
+    if isinstance(key, str) and '|' in key and valid_keys and key not in valid_keys:
+        raise HTTPException(400, 'outfit_key does not match this grid')
     await db.trips.update_one(
         {'id': trip_id, 'user_id': user['id']},
-        {'$set': {f'occasion_tags.{payload.outfit_index}': payload.occasion}}
+        {'$set': {f'occasion_tags.{key}': payload.occasion}}
     )
     trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
     if not trip:
         raise HTTPException(404, 'Trip not found')
+    return Trip(**trip)
+
+@api_router.put("/trips/{trip_id}/outfit-plan", response_model=Trip)
+async def update_outfit_plan(trip_id: str, payload: OutfitPlanUpdate, user: dict = Depends(get_current_user)):
+    validate_trip_dates(payload.date, payload.date)
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    if payload.date < trip['start_date'] or payload.date > trip['end_date']:
+        raise HTTPException(400, 'date must be within the trip dates')
+    plan = dict(trip.get('outfit_plan') or {})
+    if payload.outfit_key:
+        valid_keys = valid_outfit_keys(trip.get('grid') or [])
+        if valid_keys and payload.outfit_key not in valid_keys:
+            raise HTTPException(400, 'outfit_key does not match this grid')
+        plan[payload.date] = payload.outfit_key
+    else:
+        plan.pop(payload.date, None)
+    await db.trips.update_one({'id': trip_id, 'user_id': user['id']}, {'$set': {'outfit_plan': plan}})
+    trip = await db.trips.find_one({'id': trip_id, 'user_id': user['id']}, {'_id': 0})
     return Trip(**trip)
 
 @api_router.put("/trips/{trip_id}/checklist", response_model=Trip)
@@ -339,10 +893,21 @@ async def weather(latitude: float, longitude: float, start_date: Optional[str] =
         'longitude': longitude,
         'daily': 'temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code',
         'timezone': 'auto',
-        'forecast_days': 14,
     }
+    if start_date and end_date:
+        validate_trip_dates(start_date, end_date)
+        params['start_date'] = start_date
+        params['end_date'] = end_date
+    else:
+        params['forecast_days'] = 14
     async with httpx.AsyncClient(timeout=10) as cli:
         r = await cli.get('https://api.open-meteo.com/v1/forecast', params=params)
+        if r.status_code != 200 and start_date and end_date:
+            fallback = dict(params)
+            fallback.pop('start_date', None)
+            fallback.pop('end_date', None)
+            fallback['forecast_days'] = 14
+            r = await cli.get('https://api.open-meteo.com/v1/forecast', params=fallback)
         if r.status_code != 200:
             raise HTTPException(502, 'Weather service error')
         return r.json()
@@ -370,25 +935,230 @@ async def geocode(q: str):
 async def root():
     return {'service': 'Packr', 'status': 'ok'}
 
-# ========== COLOR PALETTE EXTRACTION ==========
+# ========== IMAGE PROCESSING / UPLOADS ==========
 class PaletteRequest(BaseModel):
     image: str  # data:image/jpeg;base64,... or raw base64
 
 FREE_TRIP_CAP = 2
 MAX_IMAGE_BYTES = 4 * 1024 * 1024  # 4 MB decoded
-Image.MAX_IMAGE_PIXELS = 24_000_000  # ~24 megapixels max — Pillow decompression-bomb guard
+RESAMPLE_LANCZOS = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS
+
+def decode_image_payload(raw: str) -> bytes:
+    if ',' in raw and raw.startswith('data:'):
+        raw = raw.split(',', 1)[1]
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(413, 'Image too large (max ~6 MB)')
+    data = base64.b64decode(raw, validate=False)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, f'Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)')
+    return data
+
+def public_upload_url(path: Path) -> str:
+    relative = path.relative_to(UPLOAD_DIR).as_posix()
+    if PUBLIC_UPLOAD_BASE_URL:
+        return f'{PUBLIC_UPLOAD_BASE_URL}/uploads/{relative}'
+    return f'/uploads/{relative}'
+
+def resolve_local_upload_path(url: str) -> Optional[Path]:
+    if not url or url.startswith('data:'):
+        return None
+    parsed = urlparse(url)
+    path_value = unquote(parsed.path if parsed.scheme else url)
+    if path_value.startswith('/uploads/'):
+        relative = path_value[len('/uploads/'):]
+    elif path_value.startswith('uploads/'):
+        relative = path_value[len('uploads/'):]
+    else:
+        return None
+    if not relative or '..' in Path(relative).parts:
+        return None
+    base = UPLOAD_DIR.resolve()
+    target = (UPLOAD_DIR / relative).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return None
+    return target if target.is_file() else None
+
+def load_item_image(image_value: str) -> Optional[Image.Image]:
+    if not image_value:
+        return None
+    try:
+        if image_value.startswith('data:'):
+            data = decode_image_payload(image_value)
+            return Image.open(io.BytesIO(data)).convert('RGBA')
+        path = resolve_local_upload_path(image_value)
+        if path:
+            return Image.open(path).convert('RGBA')
+    except Exception:
+        return None
+    return None
+
+def render_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    candidates = [
+        'arialbd.ttf' if bold else 'arial.ttf',
+        'DejaVuSans-Bold.ttf' if bold else 'DejaVuSans.ttf',
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+def fit_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
+    value = ' '.join((text or '').split())[:120]
+    if draw.textlength(value, font=font) <= max_width:
+        return value
+    while value and draw.textlength(f'{value}...', font=font) > max_width:
+        value = value[:-1]
+    return f'{value}...' if value else ''
+
+def item_dominant_colors(items: List[dict]) -> List[str]:
+    colors: List[str] = []
+    for item in items:
+        for color in item.get('colors') or []:
+            value = str(color).strip()
+            if re.match(r'^#[0-9A-Fa-f]{6}$', value) and value.upper() not in colors:
+                colors.append(value.upper())
+            if len(colors) >= 9:
+                return colors
+    return colors
+
+def category_color(category: str) -> str:
+    return {
+        'top': '#7C8F75',
+        'bottom': '#4F6E85',
+        'layer': '#A66A4B',
+    }.get(category, '#777777')
+
+def hex_to_rgb(value: str) -> tuple:
+    value = value.strip().lstrip('#')
+    try:
+        return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+    except Exception:
+        return (120, 120, 120)
+
+def paste_contained(base: Image.Image, source: Image.Image, box: tuple) -> None:
+    left, top, right, bottom = box
+    max_size = (max(1, right - left), max(1, bottom - top))
+    thumb = ImageOps.contain(source, max_size, RESAMPLE_LANCZOS)
+    x = left + (max_size[0] - thumb.width) // 2
+    y = top + (max_size[1] - thumb.height) // 2
+    if thumb.mode == 'RGBA':
+        base.paste(thumb.convert('RGB'), (x, y), thumb.getchannel('A'))
+    else:
+        base.paste(thumb.convert('RGB'), (x, y))
+
+def render_community_post_image(user: dict, trip: dict, grid: List[str], by_id: Dict[str, dict], title: str) -> Dict[str, Any]:
+    width, height = 720, 900
+    canvas = Image.new('RGB', (width, height), '#F7F5F0')
+    draw = ImageDraw.Draw(canvas)
+    title_font = render_font(34, bold=True)
+    meta_font = render_font(18)
+    label_font = render_font(14, bold=True)
+    name_font = render_font(16, bold=True)
+
+    margin = 44
+    draw.text((margin, 36), fit_text(draw, title, title_font, width - margin * 2), font=title_font, fill='#1F1F1F')
+    meta = f"{trip.get('destination', 'Trip')} - {days_between(trip.get('start_date', ''), trip.get('end_date', ''))} days"
+    draw.text((margin, 82), fit_text(draw, meta, meta_font, width - margin * 2), font=meta_font, fill='#66615B')
+    draw.text((margin, 112), fit_text(draw, f"by {display_name(user)}", meta_font, width - margin * 2), font=meta_font, fill='#8A8178')
+
+    grid_left = margin
+    grid_top = 158
+    gap = 12
+    cell = (width - margin * 2 - gap * 2) // 3
+    ordered_items = [by_id[item_id] for item_id in grid if item_id in by_id]
+
+    for slot, item_id in enumerate(grid):
+        item = by_id[item_id]
+        row = slot // 3
+        col = slot % 3
+        x = grid_left + col * (cell + gap)
+        y = grid_top + row * (cell + gap)
+        category = item.get('category') or CATEGORY_BY_SLOT[slot]
+        accent = category_color(category)
+        fill = tuple(min(255, int(channel * 0.12 + 238)) for channel in hex_to_rgb(accent))
+        draw.rounded_rectangle((x, y, x + cell, y + cell), radius=18, fill=fill, outline=accent, width=2)
+        draw.rounded_rectangle((x + 12, y + 12, x + 82, y + 36), radius=10, fill=accent)
+        draw.text((x + 22, y + 17), category.upper(), font=label_font, fill='#FFFFFF')
+
+        image = load_item_image(item.get('image', ''))
+        if image:
+            paste_contained(canvas, image, (x + 18, y + 44, x + cell - 18, y + cell - 42))
+        else:
+            draw.text((x + 22, y + 86), category.upper(), font=label_font, fill=accent)
+
+        name = fit_text(draw, item.get('name') or category, name_font, cell - 28)
+        draw.text((x + 14, y + cell - 30), name, font=name_font, fill='#2A2826')
+
+    colors = item_dominant_colors(ordered_items)
+    swatch_y = grid_top + cell * 3 + gap * 2 + 34
+    draw.text((margin, swatch_y), 'Palette', font=label_font, fill='#66615B')
+    swatch_x = margin + 86
+    for index, color in enumerate(colors[:9]):
+        x = swatch_x + index * 30
+        draw.ellipse((x, swatch_y - 2, x + 22, swatch_y + 20), fill=color, outline='#D6D0C8', width=1)
+
+    footer = f"{trip.get('start_date', '')} - {trip.get('end_date', '')}"
+    draw.text((margin, height - 48), fit_text(draw, footer, meta_font, width - margin * 2), font=meta_font, fill='#8A8178')
+
+    target_dir = UPLOAD_DIR / 'community' / user['id']
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f'{uuid.uuid4().hex}.jpg'
+    canvas.save(target, format='JPEG', quality=78, optimize=True)
+    return {
+        'url': public_upload_url(target),
+        'width': width,
+        'height': height,
+        'content_type': 'image/jpeg',
+        'dominant_colors': colors,
+    }
+
+def delete_community_post_image(url: str) -> None:
+    path = resolve_local_upload_path(url)
+    if not path:
+        return
+    community_dir = (UPLOAD_DIR / 'community').resolve()
+    try:
+        path.resolve().relative_to(community_dir)
+    except ValueError:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        logging.warning('Could not delete community image %s', path)
+
+@api_router.post('/uploads/wardrobe-image', response_model=UploadImageResponse)
+async def upload_wardrobe_image(payload: UploadImageRequest, user: dict = Depends(get_current_user)):
+    try:
+        data = decode_image_payload(payload.image)
+        img = Image.open(io.BytesIO(data)).convert('RGB')
+        img.thumbnail((1280, 1280))
+        user_dir = UPLOAD_DIR / 'wardrobe' / user['id']
+        user_dir.mkdir(parents=True, exist_ok=True)
+        target = user_dir / f'{uuid.uuid4().hex}.jpg'
+        img.save(target, format='JPEG', quality=82, optimize=True)
+        return UploadImageResponse(
+            url=public_upload_url(target),
+            width=img.width,
+            height=img.height,
+            content_type='image/jpeg',
+        )
+    except HTTPException:
+        raise
+    except Image.DecompressionBombError:
+        raise HTTPException(413, 'Image is too large to process safely')
+    except Exception as e:
+        raise HTTPException(400, f'Could not process image: {e}')
+
+Image.MAX_IMAGE_PIXELS = 24_000_000  # About 24 megapixels max for Pillow decompression-bomb guard
 
 @api_router.post("/palette")
 async def extract_palette(payload: PaletteRequest, user: dict = Depends(get_current_user)):
-    raw = payload.image
-    if ',' in raw and raw.startswith('data:'):
-        raw = raw.split(',', 1)[1]
-    if len(raw) > 8 * 1024 * 1024:  # ~8MB base64 → ~6MB binary
-        raise HTTPException(413, 'Image too large (max ~6 MB)')
     try:
-        data = base64.b64decode(raw, validate=False)
-        if len(data) > MAX_IMAGE_BYTES:
-            raise HTTPException(413, f'Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)')
+        data = decode_image_payload(payload.image)
         img = Image.open(io.BytesIO(data))
         # Light decode without loading huge images at full resolution
         img.draft('RGB', (256, 256))
@@ -417,6 +1187,80 @@ async def extract_palette(payload: PaletteRequest, user: dict = Depends(get_curr
     except Exception as e:
         raise HTTPException(400, f'Could not parse image: {e}')
 
+def estimate_background_rgb(img: Image.Image) -> tuple:
+    width, height = img.size
+    pixels = img.load()
+    step = max(1, min(width, height) // 32)
+    samples = []
+    for x in range(0, width, step):
+        samples.append(pixels[x, 0])
+        samples.append(pixels[x, height - 1])
+    for y in range(0, height, step):
+        samples.append(pixels[0, y])
+        samples.append(pixels[width - 1, y])
+    visible = [sample[:3] for sample in samples if len(sample) < 4 or sample[3] > 16]
+    if not visible:
+        visible = [sample[:3] for sample in samples]
+    return tuple(sorted(sample[channel] for sample in visible)[len(visible) // 2] for channel in range(3))
+
+def color_distance(pixel: tuple, bg: tuple) -> float:
+    return ((pixel[0] - bg[0]) ** 2 + (pixel[1] - bg[1]) ** 2 + (pixel[2] - bg[2]) ** 2) ** 0.5
+
+def edge_connected_background_mask(img: Image.Image, bg: tuple) -> Image.Image:
+    width, height = img.size
+    pixels = img.load()
+    threshold = 72
+    mask = Image.new('L', (width, height), 0)
+    mask_pixels = mask.load()
+    visited = bytearray(width * height)
+    queue = deque()
+
+    def enqueue(x: int, y: int) -> None:
+        index = y * width + x
+        if visited[index]:
+            return
+        visited[index] = 1
+        r, g, b, a = pixels[x, y]
+        if a <= 16 or color_distance((r, g, b), bg) <= threshold:
+            queue.append((x, y))
+
+    for x in range(width):
+        enqueue(x, 0)
+        enqueue(x, height - 1)
+    for y in range(height):
+        enqueue(0, y)
+        enqueue(width - 1, y)
+
+    while queue:
+        x, y = queue.popleft()
+        mask_pixels[x, y] = 255
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if 0 <= nx < width and 0 <= ny < height:
+                enqueue(nx, ny)
+    return mask
+
+@api_router.post("/cutout")
+async def remove_background(payload: PaletteRequest, user: dict = Depends(get_current_user)):
+    try:
+        data = decode_image_payload(payload.image)
+        img = Image.open(io.BytesIO(data)).convert('RGBA')
+        img.thumbnail((768, 768))
+        bg = estimate_background_rgb(img)
+        background = edge_connected_background_mask(img, bg)
+        soft_background = background.filter(ImageFilter.GaussianBlur(1.5))
+        foreground_alpha = Image.eval(soft_background, lambda value: 255 - value)
+        img.putalpha(ImageChops.multiply(img.getchannel('A'), foreground_alpha))
+        out = io.BytesIO()
+        img.save(out, format='PNG')
+        encoded = base64.b64encode(out.getvalue()).decode('utf-8')
+        return {'image': f'data:image/png;base64,{encoded}', 'method': 'edge-connected'}
+    except HTTPException:
+        raise
+    except Image.DecompressionBombError:
+        raise HTTPException(413, 'Image is too large to process safely')
+    except Exception as e:
+        raise HTTPException(400, f'Could not process image: {e}')
+
 # ========== COMMUNITY TEMPLATES ==========
 class TemplateItem(BaseModel):
     name: str
@@ -443,8 +1287,35 @@ class Template(TemplateCreate):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 @api_router.get("/templates", response_model=List[Template])
-async def list_templates():
-    docs = await db.templates.find({}, {'_id': 0}).sort([('is_official', -1), ('likes', -1)]).to_list(200)
+async def list_templates(
+    q: Optional[str] = None,
+    climate: Optional[str] = None,
+    days_min: Optional[int] = None,
+    days_max: Optional[int] = None,
+    source: Optional[Literal['official', 'community', 'all']] = 'all',
+):
+    query: Dict[str, Any] = {}
+    if q:
+        safe = re.escape(q.strip())
+        query['$or'] = [
+            {'title': {'$regex': safe, '$options': 'i'}},
+            {'description': {'$regex': safe, '$options': 'i'}},
+            {'destination': {'$regex': safe, '$options': 'i'}},
+            {'season': {'$regex': safe, '$options': 'i'}},
+        ]
+    if climate:
+        query['climate'] = climate
+    if days_min is not None or days_max is not None:
+        query['days'] = {}
+        if days_min is not None:
+            query['days']['$gte'] = days_min
+        if days_max is not None:
+            query['days']['$lte'] = days_max
+    if source == 'official':
+        query['is_official'] = True
+    elif source == 'community':
+        query['is_official'] = False
+    docs = await db.templates.find(query, {'_id': 0}).sort([('is_official', -1), ('likes', -1)]).to_list(200)
     return [Template(**d) for d in docs]
 
 @api_router.get("/templates/{tid}", response_model=Template)
@@ -456,18 +1327,23 @@ async def get_template(tid: str):
 
 @api_router.post("/templates", response_model=Template)
 async def publish_template(payload: TemplateCreate, user: dict = Depends(get_current_user)):
-    if not user.get('is_pro', False):
+    if FEATURE_PRO_ENABLED and not user.get('is_pro', False):
         raise HTTPException(
             402,
             'Publishing community templates is a Packr Pro feature. Upgrade to share your grids.'
         )
     if len(payload.items) != 9:
         raise HTTPException(400, 'Template must include exactly 9 items')
+    items = normalize_template_items([item.dict() for item in payload.items])
+    if len(items) != 9 or [item.get('category') for item in items] != CATEGORY_BY_SLOT:
+        raise HTTPException(400, 'Template must include 3 tops, 3 bottoms, and 3 layers')
+    data = payload.dict(exclude={'items'})
     tpl = Template(
         author_id=user['id'],
-        author_name=user.get('name') or user['email'].split('@')[0],
+        author_name='anonymous',
         is_official=False,
-        **payload.dict(),
+        items=items,
+        **data,
     )
     await db.templates.insert_one(tpl.dict())
     return tpl
@@ -498,6 +1374,278 @@ async def unlike_template(tid: str, user: dict = Depends(get_current_user)):
     if not tpl:
         raise HTTPException(404, 'Template not found')
     return Template(**tpl)
+
+# ========== COMMUNITY / SOCIAL ==========
+@api_router.get("/community/posts", response_model=List[CommunityPost])
+async def list_community_posts(
+    scope: Literal['public', 'following', 'saved', 'mine'] = 'public',
+    limit: int = 30,
+    user: dict = Depends(get_current_user),
+):
+    limit = max(1, min(limit, 50))
+    query: Dict[str, Any]
+    if scope == 'mine':
+        query = {'author_id': user['id']}
+    elif scope == 'following':
+        follows = await db.follows.find({'follower_id': user['id']}, {'_id': 0}).to_list(500)
+        following_ids = [follow['following_id'] for follow in follows]
+        if not following_ids:
+            return []
+        query = {'author_id': {'$in': following_ids}, 'visibility': {'$in': ['public', 'followers']}}
+    elif scope == 'saved':
+        saves = await db.post_saves.find(
+            {'user_id': user['id']},
+            {'_id': 0},
+        ).sort('created_at', -1).to_list(500)
+        visible_saved: List[CommunityPost] = []
+        for save in saves:
+            post = await db.community_posts.find_one({'id': save['post_id']}, {'_id': 0})
+            if not post:
+                await db.post_saves.delete_one({'post_id': save['post_id'], 'user_id': user['id']})
+                continue
+            if await can_view_post(post, user['id']):
+                visible_saved.append(await enrich_post(post, user['id']))
+            if len(visible_saved) >= limit:
+                break
+        return visible_saved
+    else:
+        query = {'visibility': 'public'}
+    posts = await db.community_posts.find(query, {'_id': 0}).sort('created_at', -1).to_list(limit)
+    visible = [post for post in posts if await can_view_post(post, user['id'])]
+    return [await enrich_post(post, user['id']) for post in visible]
+
+@api_router.post("/community/posts", response_model=CommunityPost)
+async def create_community_post(payload: CommunityPostCreate, user: dict = Depends(get_current_user)):
+    trip = await db.trips.find_one({'id': payload.trip_id, 'user_id': user['id']}, {'_id': 0})
+    if not trip:
+        raise HTTPException(404, 'Trip not found')
+    grid = trip.get('grid') or []
+    if len(grid) != 9 or any(not item_id for item_id in grid):
+        raise HTTPException(400, 'Complete all 9 grid slots before sharing')
+    item_ids = [item_id for item_id in grid if item_id]
+    wardrobe = await db.wardrobe.find(
+        {'user_id': user['id'], 'id': {'$in': item_ids}},
+        {'_id': 0}
+    ).to_list(20)
+    by_id = {item['id']: item for item in wardrobe}
+    for slot, item_id in enumerate(grid):
+        if not by_id.get(item_id):
+            raise HTTPException(400, 'Grid contains items that are no longer in your wardrobe')
+    title = clean_social_text(payload.title, field='Title', max_length=80)
+    if not title:
+        title = f"{trip['destination']} packing grid"
+    image = render_community_post_image(user, trip, grid, by_id, title)
+    post = CommunityPost(
+        author_id=user['id'],
+        author_name=display_name(user),
+        trip_id=trip['id'],
+        title=title,
+        caption=clean_social_text(payload.caption, field='Caption', max_length=220),
+        visibility=payload.visibility,
+        destination=trip['destination'],
+        start_date=trip['start_date'],
+        end_date=trip['end_date'],
+        days=days_between(trip['start_date'], trip['end_date']),
+        image_url=image['url'],
+        image_width=image['width'],
+        image_height=image['height'],
+        dominant_colors=image['dominant_colors'],
+    )
+    stored_post = post.dict(exclude={'is_liked', 'is_saved', 'is_following_author', 'latest_comments'})
+    await db.community_posts.insert_one(stored_post)
+    return await enrich_post(stored_post, user['id'])
+
+@api_router.get("/community/posts/{post_id}", response_model=CommunityPost)
+async def get_community_post(post_id: str, user: dict = Depends(get_current_user)):
+    post = await get_visible_post(post_id, user['id'])
+    return await enrich_post(post, user['id'])
+
+@api_router.delete("/community/posts/{post_id}")
+async def delete_community_post(post_id: str, user: dict = Depends(get_current_user)):
+    post = await db.community_posts.find_one({'id': post_id}, {'_id': 0})
+    if not post or post.get('author_id') != user['id']:
+        raise HTTPException(404, 'Community post not found')
+    delete_community_post_image(post.get('image_url', ''))
+    await db.community_posts.delete_one({'id': post_id})
+    await db.comments.delete_many({'post_id': post_id})
+    await db.post_likes.delete_many({'post_id': post_id})
+    await db.post_saves.delete_many({'post_id': post_id})
+    return {'ok': True}
+
+@api_router.post("/community/posts/{post_id}/like", response_model=CommunityPost)
+async def like_community_post(post_id: str, user: dict = Depends(get_current_user)):
+    post = await get_visible_post(post_id, user['id'])
+    await upsert_social_edge(
+        db.post_likes,
+        {'post_id': post_id, 'user_id': user['id']},
+        {
+            'post_id': post_id,
+            'user_id': user['id'],
+            'created_at': datetime.now(timezone.utc),
+        },
+    )
+    post = await db.community_posts.find_one({'id': post_id}, {'_id': 0}) or post
+    return await enrich_post(post, user['id'])
+
+@api_router.delete("/community/posts/{post_id}/like", response_model=CommunityPost)
+async def unlike_community_post(post_id: str, user: dict = Depends(get_current_user)):
+    post = await get_visible_post(post_id, user['id'])
+    await db.post_likes.delete_one({'post_id': post_id, 'user_id': user['id']})
+    post = await db.community_posts.find_one({'id': post_id}, {'_id': 0}) or post
+    return await enrich_post(post, user['id'])
+
+@api_router.post("/community/posts/{post_id}/save", response_model=CommunityPost)
+async def save_community_post(post_id: str, user: dict = Depends(get_current_user)):
+    post = await get_visible_post(post_id, user['id'])
+    await upsert_social_edge(
+        db.post_saves,
+        {'post_id': post_id, 'user_id': user['id']},
+        {
+            'post_id': post_id,
+            'user_id': user['id'],
+            'created_at': datetime.now(timezone.utc),
+        },
+    )
+    post = await db.community_posts.find_one({'id': post_id}, {'_id': 0}) or post
+    return await enrich_post(post, user['id'])
+
+@api_router.delete("/community/posts/{post_id}/save", response_model=CommunityPost)
+async def unsave_community_post(post_id: str, user: dict = Depends(get_current_user)):
+    post = await get_visible_post(post_id, user['id'])
+    await db.post_saves.delete_one({'post_id': post_id, 'user_id': user['id']})
+    post = await db.community_posts.find_one({'id': post_id}, {'_id': 0}) or post
+    return await enrich_post(post, user['id'])
+
+@api_router.post("/community/posts/{post_id}/comments", response_model=CommunityPost)
+async def add_community_comment(
+    post_id: str,
+    payload: CommunityCommentCreate,
+    user: dict = Depends(get_current_user),
+):
+    post = await get_visible_post(post_id, user['id'])
+    text = clean_social_text(payload.text, field='Comment', max_length=500, allow_empty=False)
+    comment = CommunityComment(
+        post_id=post_id,
+        user_id=user['id'],
+        user_name=display_name(user),
+        text=text,
+    )
+    await db.comments.insert_one(comment.dict())
+    post = await db.community_posts.find_one({'id': post_id}, {'_id': 0}) or post
+    return await enrich_post(post, user['id'])
+
+@api_router.delete("/community/posts/{post_id}/comments/{comment_id}", response_model=CommunityPost)
+async def delete_community_comment(
+    post_id: str,
+    comment_id: str,
+    user: dict = Depends(get_current_user),
+):
+    post = await get_visible_post(post_id, user['id'])
+    comment = await db.comments.find_one({'id': comment_id, 'post_id': post_id}, {'_id': 0})
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+    if comment.get('user_id') != user['id'] and post.get('author_id') != user['id']:
+        raise HTTPException(403, 'You can only delete your own comments')
+    await db.comments.delete_one({'id': comment_id, 'post_id': post_id})
+    post = await db.community_posts.find_one({'id': post_id}, {'_id': 0}) or post
+    return await enrich_post(post, user['id'])
+
+@api_router.post("/community/posts/{post_id}/report")
+async def report_community_post(
+    post_id: str,
+    payload: CommunityReportCreate,
+    user: dict = Depends(get_current_user),
+):
+    post = await get_visible_post(post_id, user['id'])
+    await upsert_social_edge(
+        db.community_reports,
+        {'post_id': post_id, 'reporter_id': user['id']},
+        {
+            'post_id': post_id,
+            'reporter_id': user['id'],
+            'author_id': post.get('author_id'),
+            'reason': clean_social_text(payload.reason or '', field='Reason', max_length=500),
+            'created_at': datetime.now(timezone.utc),
+        },
+    )
+    return {'status': 'reported'}
+
+@api_router.post("/community/posts/{post_id}/comments/{comment_id}/report")
+async def report_community_comment(
+    post_id: str,
+    comment_id: str,
+    payload: CommunityReportCreate,
+    user: dict = Depends(get_current_user),
+):
+    await get_visible_post(post_id, user['id'])
+    comment = await db.comments.find_one({'id': comment_id, 'post_id': post_id}, {'_id': 0})
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+    await upsert_social_edge(
+        db.comment_reports,
+        {'comment_id': comment_id, 'reporter_id': user['id']},
+        {
+            'post_id': post_id,
+            'comment_id': comment_id,
+            'reporter_id': user['id'],
+            'author_id': comment.get('user_id'),
+            'reason': clean_social_text(payload.reason or '', field='Reason', max_length=500),
+            'created_at': datetime.now(timezone.utc),
+        },
+    )
+    return {'status': 'reported'}
+
+@api_router.get("/users/{uid}", response_model=SocialProfile)
+async def get_social_profile(uid: str, user: dict = Depends(get_current_user)):
+    return await social_profile_for(uid, user['id'])
+
+@api_router.post("/users/{uid}/follow", response_model=SocialProfile)
+async def follow_user(uid: str, user: dict = Depends(get_current_user)):
+    if uid == user['id']:
+        raise HTTPException(400, 'You cannot follow yourself')
+    target = await db.users.find_one({'id': uid}, {'_id': 0})
+    if not target:
+        raise HTTPException(404, 'User not found')
+    await upsert_social_edge(
+        db.follows,
+        {'follower_id': user['id'], 'following_id': uid},
+        {
+            'follower_id': user['id'],
+            'following_id': uid,
+            'created_at': datetime.now(timezone.utc),
+        },
+    )
+    return await social_profile_for(uid, user['id'])
+
+@api_router.delete("/users/{uid}/follow", response_model=SocialProfile)
+async def unfollow_user(uid: str, user: dict = Depends(get_current_user)):
+    if uid == user['id']:
+        raise HTTPException(400, 'You cannot unfollow yourself')
+    await db.follows.delete_one({'follower_id': user['id'], 'following_id': uid})
+    return await social_profile_for(uid, user['id'])
+
+@api_router.post("/analytics/events")
+async def record_analytics_event(payload: AnalyticsEventCreate, user: dict = Depends(get_current_user)):
+    await db.analytics_events.insert_one({
+        'id': str(uuid.uuid4()),
+        'user_id': user['id'],
+        'name': payload.name,
+        'properties': payload.properties,
+        'created_at': datetime.now(timezone.utc),
+    })
+    return {'ok': True}
+
+@api_router.post("/feedback")
+async def submit_feedback(payload: FeedbackCreate, user: dict = Depends(get_current_user)):
+    await db.feedback.insert_one({
+        'id': str(uuid.uuid4()),
+        'user_id': user['id'],
+        'email': user.get('email'),
+        'message': payload.message.strip(),
+        'context': (payload.context or '').strip(),
+        'created_at': datetime.now(timezone.utc),
+    })
+    return {'ok': True}
 
 class ApplyTemplate(BaseModel):
     trip_id: str
@@ -531,14 +1679,20 @@ async def apply_template(tid: str, payload: ApplyTemplate, user: dict = Depends(
             if not still_used:
                 await db.wardrobe.delete_one({'id': item['id'], 'user_id': user['id']})
 
+    template_items = normalize_template_items(tpl.get('items', []))
+    if len(template_items) != 9:
+        raise HTTPException(400, 'Template must include exactly 9 items')
     new_grid: List[Optional[str]] = [None] * 9
-    for slot, raw in enumerate(tpl.get('items', [])[:9]):
+    for slot, raw in enumerate(template_items):
+        expected_category = category_for_slot(slot)
+        if raw.get('category') != expected_category:
+            raise HTTPException(400, 'Template item order is invalid')
         item_id = str(uuid.uuid4())
         item = {
             'id': item_id,
             'user_id': user['id'],
             'name': raw.get('name', f'Item {slot + 1}'),
-            'category': raw.get('category', ['top', 'bottom', 'layer'][slot % 3]),
+            'category': expected_category,
             'image': raw.get('image', ''),
             'colors': raw.get('colors', []),
             'weight_kg': 0.3,
@@ -550,7 +1704,7 @@ async def apply_template(tid: str, payload: ApplyTemplate, user: dict = Depends(
 
     await db.trips.update_one(
         {'id': payload.trip_id, 'user_id': user['id']},
-        {'$set': {'grid': new_grid}}
+        {'$set': {**clean_outfit_state_for_grid(trip, new_grid), 'grid': new_grid}}
     )
     trip = await db.trips.find_one({'id': payload.trip_id, 'user_id': user['id']}, {'_id': 0})
     return Trip(**trip)
@@ -562,20 +1716,23 @@ class AirlineProfile(BaseModel):
 
 @api_router.post("/me/pro", response_model=UserPublic)
 async def upgrade_to_pro(user: dict = Depends(get_current_user)):
-    """Stub upgrade — real billing/payment is Phase 2 (Stripe / Razorpay)."""
+    if not FEATURE_PRO_ENABLED:
+        raise HTTPException(404, 'Packr Pro is not enabled for this release')
     await db.users.update_one({'id': user['id']}, {'$set': {'is_pro': True}})
     user = await db.users.find_one({'id': user['id']}, {'_id': 0})
     return user_public(user)
 
 @api_router.delete("/me/pro", response_model=UserPublic)
 async def downgrade_pro(user: dict = Depends(get_current_user)):
+    if not FEATURE_PRO_ENABLED:
+        raise HTTPException(404, 'Packr Pro is not enabled for this release')
     await db.users.update_one({'id': user['id']}, {'$set': {'is_pro': False}})
     user = await db.users.find_one({'id': user['id']}, {'_id': 0})
     return user_public(user)
 
 @api_router.post("/me/airlines", response_model=UserPublic)
 async def add_airline(payload: AirlineProfile, user: dict = Depends(get_current_user)):
-    if not user.get('is_pro', False):
+    if FEATURE_PRO_ENABLED and not user.get('is_pro', False):
         raise HTTPException(402, 'Custom airline profiles are a Packr Pro feature.')
     # Backfill defaults for legacy users that registered before airline_profiles field existed
     if not user.get('airline_profiles'):
@@ -695,6 +1852,25 @@ DEFAULT_TEMPLATES = [
 @app.on_event("startup")
 async def seed_templates():
     try:
+        if os.environ.get('DB_NAME', '').lower().startswith('test'):
+            await db.users.update_one(
+                {'email': 'test@packr.app'},
+                {
+                    '$set': {
+                        'password_hash': hash_password('test1234'),
+                        'name': 'Test User',
+                        'is_pro': True,
+                        'airline_profiles': list(DEFAULT_AIRLINES),
+                    },
+                    '$setOnInsert': {
+                        'id': str(uuid.uuid4()),
+                        'email': 'test@packr.app',
+                        'created_at': datetime.now(timezone.utc),
+                    },
+                },
+                upsert=True,
+            )
+
         # Unique compound index for per-user like idempotency (DB-level guard).
         try:
             await db.template_likes.create_index(
@@ -703,6 +1879,24 @@ async def seed_templates():
         except Exception as ie:
             logger.info(f'template_likes index ensure: {ie}')
 
+        social_indexes = [
+            (db.community_posts, [('visibility', 1), ('created_at', -1)], False, 'idx_post_visibility_created'),
+            (db.community_posts, [('author_id', 1), ('created_at', -1)], False, 'idx_post_author_created'),
+            (db.comments, [('post_id', 1), ('created_at', -1)], False, 'idx_comment_post_created'),
+            (db.post_likes, [('post_id', 1), ('user_id', 1)], True, 'uniq_post_like'),
+            (db.post_saves, [('post_id', 1), ('user_id', 1)], True, 'uniq_post_save'),
+            (db.post_saves, [('user_id', 1), ('created_at', -1)], False, 'idx_save_user_created'),
+            (db.follows, [('follower_id', 1), ('following_id', 1)], True, 'uniq_follow'),
+            (db.follows, [('following_id', 1), ('created_at', -1)], False, 'idx_following_created'),
+            (db.community_reports, [('post_id', 1), ('reporter_id', 1)], True, 'uniq_post_report'),
+            (db.comment_reports, [('comment_id', 1), ('reporter_id', 1)], True, 'uniq_comment_report'),
+        ]
+        for collection, keys, unique, name in social_indexes:
+            try:
+                await collection.create_index(keys, unique=unique, name=name)
+            except Exception as ie:
+                logger.info(f'{name} index ensure: {ie}')
+
         existing = await db.templates.count_documents({'is_official': True})
         if existing >= len(DEFAULT_TEMPLATES):
             return
@@ -710,7 +1904,9 @@ async def seed_templates():
             already = await db.templates.find_one({'title': t['title'], 'is_official': True})
             if already:
                 continue
-            tpl = Template(**t)
+            seed_doc = dict(t)
+            seed_doc['items'] = normalize_template_items(t['items'])
+            tpl = Template(**seed_doc)
             await db.templates.insert_one(tpl.dict())
         logger.info(f'Seeded {len(DEFAULT_TEMPLATES)} official templates')
     except Exception as e:
@@ -718,10 +1914,13 @@ async def seed_templates():
 
 app.include_router(api_router)
 
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount('/uploads', StaticFiles(directory=str(UPLOAD_DIR)), name='uploads')
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -5,10 +5,11 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  Image,
   ActivityIndicator,
   Alert,
+  Modal,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
@@ -22,12 +23,13 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, WardrobeItem } from '../../src/lib/api';
+import { api, getApiErrorMessage, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
 import {
   categoryForSlot,
   checkConflicts,
   isGridComplete,
 } from '../../src/lib/sudoku';
+import { CATEGORY_META } from '../../src/lib/wardrobeMeta';
 
 type SlotRect = { x: number; y: number; w: number; h: number };
 
@@ -42,13 +44,14 @@ export default function GridScreen() {
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0];
   const [grid, setGrid] = useState<(string | null)[]>(trip?.grid || Array(9).fill(null));
   const [saving, setSaving] = useState(false);
+  const [pickerSlot, setPickerSlot] = useState<number | null>(null);
 
   // Slot rects in absolute screen coordinates (set via onLayout + measure)
   const slotRects = useRef<Record<number, SlotRect>>({});
 
   useEffect(() => {
     if (trip) setGrid(trip.grid);
-  }, [trip?.id]);
+  }, [trip]);
 
   const itemsById = useMemo(() => {
     const m: Record<string, WardrobeItem> = {};
@@ -67,8 +70,8 @@ export default function GridScreen() {
     try {
       const r = await api.put(`/trips/${trip.id}/grid`, { grid: g });
       upsertTrip(r.data);
-    } catch (e: any) {
-      Alert.alert('Save failed', e?.response?.data?.detail || 'Could not save grid');
+    } catch (e: unknown) {
+      Alert.alert('Save failed', getApiErrorMessage(e, 'Could not save grid'));
     } finally {
       setSaving(false);
     }
@@ -81,7 +84,21 @@ export default function GridScreen() {
       next[slot] = null;
       setGrid(next);
       saveGrid(next);
+      return;
     }
+    setPickerSlot(slot);
+  };
+
+  const fillSlot = (slot: number, item: WardrobeItem) => {
+    const expected = categoryForSlot(slot);
+    if (item.category !== expected) return;
+    const next = [...grid];
+    const existing = next.indexOf(item.id);
+    if (existing >= 0) next[existing] = null;
+    next[slot] = item.id;
+    setGrid(next);
+    setPickerSlot(null);
+    saveGrid(next);
   };
 
   // Drop handler: called from worklet via runOnJS
@@ -129,7 +146,7 @@ export default function GridScreen() {
       return;
     }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    router.push('/(tabs)/lookbook');
+    router.push('/outfits');
   };
 
   if (!trip) {
@@ -158,14 +175,9 @@ export default function GridScreen() {
           {trip.destination}
         </Text>
 
-        {/* Column headers */}
-        <View style={styles.colHeader}>
-          {(['TOP', 'BOTTOM', 'LAYER'] as const).map((label) => (
-            <Text key={label} style={[styles.colLabel, { color: c.textTertiary }]}>
-              {label}
-            </Text>
-          ))}
-        </View>
+        <Text style={[styles.layoutHint, { color: c.textTertiary }]}>
+          ROTATING SUDOKU LAYOUT
+        </Text>
 
         {/* 3x3 Grid */}
         <View style={[styles.grid, { borderColor: c.borderSubtle }]}>
@@ -176,6 +188,8 @@ export default function GridScreen() {
                 const id = grid[i];
                 const item = id ? itemsById[id] : null;
                 const conflict = conflicts.slotConflicts[i];
+                const expected = categoryForSlot(i);
+                const slotMeta = CATEGORY_META[item?.category || expected];
                 return (
                   <Pressable
                     testID={`grid-slot-${i}`}
@@ -200,23 +214,28 @@ export default function GridScreen() {
                         borderColor: conflict
                           ? c.warning
                           : item
-                          ? c.accent
-                          : c.borderSubtle,
+                          ? slotMeta.color
+                          : slotMeta.color + '88',
                         backgroundColor: conflict
                           ? c.warning + '22'
                           : item
-                          ? c.elevated
+                          ? slotMeta.soft
                           : c.surface,
                         borderStyle: item ? 'solid' : 'dashed',
                       },
                     ]}
                   >
+                    <View style={[styles.slotAccent, { backgroundColor: slotMeta.color }]} />
                     {item ? (
                       item.image ? (
-                        <Image source={{ uri: item.image }} style={styles.slotImg} />
+                        <Image
+                          source={{ uri: resolveApiAssetUrl(item.image) }}
+                          style={styles.slotImg}
+                          contentFit="contain"
+                        />
                       ) : (
                         <View style={{ alignItems: 'center', padding: 4 }}>
-                          <Ionicons name="shirt-outline" size={20} color={c.textPrimary} />
+                          <Ionicons name={slotMeta.icon as keyof typeof Ionicons.glyphMap} size={20} color={slotMeta.color} />
                           <Text numberOfLines={1} style={{ color: c.textPrimary, fontSize: 10, marginTop: 2 }}>
                             {item.name}
                           </Text>
@@ -225,11 +244,12 @@ export default function GridScreen() {
                     ) : (
                       <View style={{ alignItems: 'center' }}>
                         <Text style={[styles.slotIdx, { color: c.textTertiary }]}>{i + 1}</Text>
-                        <Text style={[styles.slotCat, { color: c.textTertiary }]}>
-                          {categoryForSlot(i).toUpperCase()}
-                        </Text>
+                        <Text style={[styles.slotCat, { color: slotMeta.color }]}>{slotMeta.short}</Text>
                       </View>
                     )}
+                    <View style={[styles.slotBadge, { backgroundColor: c.bg, borderColor: slotMeta.color }]}>
+                      <Text style={[styles.slotBadgeText, { color: slotMeta.color }]}>{slotMeta.short}</Text>
+                    </View>
                   </Pressable>
                 );
               })}
@@ -299,7 +319,84 @@ export default function GridScreen() {
           </Text>
         </Pressable>
       </ScrollView>
+      <SlotPickerModal
+        visible={pickerSlot != null}
+        slot={pickerSlot}
+        items={wardrobe}
+        inGrid={grid}
+        onClose={() => setPickerSlot(null)}
+        onPick={(slot, item) => fillSlot(slot, item)}
+      />
     </SafeAreaView>
+  );
+}
+
+function SlotPickerModal({
+  visible,
+  slot,
+  items,
+  inGrid,
+  onClose,
+  onPick,
+}: {
+  visible: boolean;
+  slot: number | null;
+  items: WardrobeItem[];
+  inGrid: (string | null)[];
+  onClose: () => void;
+  onPick: (slot: number, item: WardrobeItem) => void;
+}) {
+  const { c } = useTheme();
+  if (slot == null) return null;
+  const category = categoryForSlot(slot);
+  const choices = items.filter((item) => item.category === category);
+  const meta = CATEGORY_META[category];
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalRoot}>
+        <Pressable style={styles.modalBackdrop} onPress={onClose} />
+        <View style={[styles.pickerSheet, { backgroundColor: c.surface, borderColor: c.borderSubtle }]}>
+          <View style={styles.pickerHeader}>
+            <View>
+              <Text style={[styles.kicker, { color: meta.color }]}>SLOT {slot + 1}</Text>
+              <Text style={{ color: c.textPrimary, fontSize: 22, fontWeight: '800' }}>Choose {category}</Text>
+            </View>
+            <Pressable onPress={onClose} style={[styles.closeBtn, { borderColor: c.borderSubtle }]}>
+              <Ionicons name="close" size={18} color={c.textPrimary} />
+            </Pressable>
+          </View>
+          <ScrollView contentContainerStyle={{ gap: 10, paddingTop: 16 }}>
+            {choices.length === 0 ? (
+              <Text style={{ color: c.textSecondary }}>Add a {category} in Studio first.</Text>
+            ) : (
+              choices.map((item) => {
+                const used = inGrid.includes(item.id);
+                return (
+                  <Pressable
+                    key={item.id}
+                    onPress={() => onPick(slot, item)}
+                    style={[styles.pickRow, { borderColor: used ? c.borderSubtle : meta.color, backgroundColor: c.elevated }]}
+                  >
+                    {item.image ? (
+                      <Image source={{ uri: resolveApiAssetUrl(item.image) }} style={styles.pickImage} contentFit="contain" />
+                    ) : (
+                      <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={24} color={meta.color} />
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: c.textPrimary, fontSize: 15, fontWeight: '800' }}>{item.name}</Text>
+                      <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 2 }}>
+                        {used ? 'Currently in grid - will move here' : `${Number(item.weight_kg || 0).toFixed(1)}kg`}
+                      </Text>
+                    </View>
+                    <Ionicons name="add-circle-outline" size={20} color={meta.color} />
+                  </Pressable>
+                );
+              })
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -317,6 +414,7 @@ function DraggableItem({
   const ty = useSharedValue(0);
   const dragging = useSharedValue(0);
   const [isDragging, setIsDragging] = useState(false);
+  const meta = CATEGORY_META[item.category];
 
   const triggerHaptic = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
 
@@ -368,23 +466,27 @@ function DraggableItem({
             padding: 8,
             alignItems: 'center',
             justifyContent: 'center',
-            borderColor: isDragging ? c.accent : inGrid ? c.borderSubtle : c.borderActive,
-            backgroundColor: c.surface,
+            borderColor: isDragging ? meta.color : inGrid ? c.borderSubtle : meta.color,
+            backgroundColor: inGrid && !isDragging ? c.surface : meta.soft,
             opacity: inGrid && !isDragging ? 0.4 : 1,
           },
           animStyle,
         ]}
       >
         {item.image ? (
-          <Image source={{ uri: item.image }} style={{ width: 56, height: 56, borderRadius: 4 }} />
+          <Image
+            source={{ uri: resolveApiAssetUrl(item.image) }}
+            style={styles.dragImage}
+            contentFit="contain"
+          />
         ) : (
-          <Ionicons name="shirt-outline" size={24} color={c.textPrimary} />
+          <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={24} color={meta.color} />
         )}
         <Text numberOfLines={1} style={{ color: c.textPrimary, fontSize: 11, marginTop: 4 }}>
           {item.name}
         </Text>
-        <Text style={{ color: c.textTertiary, fontSize: 9, letterSpacing: 1 }}>
-          {item.category.toUpperCase()}
+        <Text style={{ color: meta.color, fontSize: 9, letterSpacing: 1, fontWeight: '800' }}>
+          {meta.short}
         </Text>
       </Animated.View>
     </GestureDetector>
@@ -395,8 +497,7 @@ const styles = StyleSheet.create({
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
   h1: { fontSize: 32, fontWeight: '700', letterSpacing: -1, marginTop: 4 },
-  colHeader: { flexDirection: 'row', justifyContent: 'space-around', marginTop: 24, marginBottom: 8 },
-  colLabel: { fontSize: 10, letterSpacing: 2, fontWeight: '600', flex: 1, textAlign: 'center' },
+  layoutHint: { fontSize: 10, letterSpacing: 2, fontWeight: '600', marginTop: 24, marginBottom: 8 },
   grid: {
     aspectRatio: 1, borderWidth: 1, borderRadius: 8, padding: 8,
     flexDirection: 'column', gap: 8,
@@ -404,11 +505,17 @@ const styles = StyleSheet.create({
   gridRow: { flex: 1, flexDirection: 'row', gap: 8 },
   slot: {
     flex: 1, borderWidth: 1, borderRadius: 6,
-    alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+    alignItems: 'center', justifyContent: 'center', overflow: 'hidden', position: 'relative',
   },
+  slotAccent: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, zIndex: 3 },
   slotImg: { width: '100%', height: '100%' },
   slotIdx: { fontSize: 18, fontWeight: '700' },
-  slotCat: { fontSize: 9, letterSpacing: 1, marginTop: 2 },
+  slotCat: { fontSize: 9, letterSpacing: 1, marginTop: 2, fontWeight: '800' },
+  slotBadge: {
+    position: 'absolute', right: 4, bottom: 4, borderWidth: 1,
+    borderRadius: 4, paddingHorizontal: 4, paddingVertical: 2,
+  },
+  slotBadgeText: { fontSize: 7, letterSpacing: 0.8, fontWeight: '900' },
   conflictBox: {
     flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: 6,
     padding: 10, marginTop: 12,
@@ -418,6 +525,22 @@ const styles = StyleSheet.create({
     width: 240, height: 110, borderWidth: 1, borderRadius: 6,
     alignItems: 'center', justifyContent: 'center', borderStyle: 'dashed', padding: 16,
   },
+  dragImage: { width: 58, height: 58, borderRadius: 4 },
   cta: { paddingVertical: 16, borderWidth: 1, borderRadius: 4, alignItems: 'center' },
   ctaText: { fontSize: 13, letterSpacing: 2, fontWeight: '600' },
+  modalRoot: { flex: 1, justifyContent: 'flex-end' },
+  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.62)' },
+  pickerSheet: {
+    maxHeight: '78%',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    padding: 20,
+    paddingBottom: 34,
+  },
+  pickerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  closeBtn: { width: 38, height: 38, borderRadius: 8, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  pickRow: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderRadius: 8, padding: 10 },
+  pickImage: { width: 54, height: 54, borderRadius: 6 },
 });

@@ -13,7 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
-import { api, Template } from '../../src/lib/api';
+import { api, getApiErrorMessage, Template } from '../../src/lib/api';
 import { useStore } from '../../src/lib/store';
 
 export default function TemplateDetail() {
@@ -51,8 +51,8 @@ export default function TemplateDetail() {
         await refreshAll();
         if (Platform.OS !== 'web') Alert.alert('Applied', 'Template loaded into your grid.');
         router.replace('/(tabs)/grid');
-      } catch (e: any) {
-        Alert.alert('Failed', e?.response?.data?.detail || 'Could not apply template');
+      } catch (e: unknown) {
+        Alert.alert('Failed', getApiErrorMessage(e, 'Could not apply template'));
       } finally {
         setApplying(false);
       }
@@ -61,7 +61,6 @@ export default function TemplateDetail() {
     const message = `This will add 9 placeholder items to your wardrobe and overwrite the grid for "${trip.destination}".`;
     if (Platform.OS === 'web') {
       // RN-Web ignores multi-button Alert.alert — use native window.confirm.
-      // eslint-disable-next-line no-alert
       if (typeof window !== 'undefined' && window.confirm(`Apply template?\n${message}`)) {
         await doApply();
       }

@@ -6,7 +6,6 @@ import {
   ScrollView,
   Pressable,
   RefreshControl,
-  ActivityIndicator,
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -67,7 +66,12 @@ export default function Dashboard() {
         if (t.latitude && t.longitude && !weather[t.id]) {
           try {
             const r = await api.get('/weather', {
-              params: { latitude: t.latitude, longitude: t.longitude },
+              params: {
+                latitude: t.latitude,
+                longitude: t.longitude,
+                start_date: t.start_date,
+                end_date: t.end_date,
+              },
             });
             next[t.id] = r.data?.daily;
           } catch {}
@@ -127,30 +131,11 @@ export default function Dashboard() {
             </Text>
           </View>
           <View style={{ flexDirection: 'row', gap: 12 }}>
-            {user?.is_pro ? (
-              <Pressable
-                testID="pro-badge"
-                onPress={() => router.push('/pro')}
-                style={[styles.proBadge, { borderColor: c.accent, backgroundColor: c.accent + '15' }]}
-              >
-                <Ionicons name="sparkles" size={12} color={c.accent} />
-                <Text style={{ color: c.accent, fontSize: 11, letterSpacing: 1, fontWeight: '700', marginLeft: 4 }}>
-                  PRO
-                </Text>
-              </Pressable>
-            ) : (
-              <Pressable
-                testID="go-pro-button"
-                onPress={() => router.push('/pro')}
-                style={[styles.proBadge, { borderColor: c.borderActive }]}
-              >
-                <Text style={{ color: c.textPrimary, fontSize: 11, letterSpacing: 1, fontWeight: '600' }}>
-                  GO PRO
-                </Text>
-              </Pressable>
-            )}
             <Pressable testID="theme-toggle-button" onPress={toggle} style={[styles.iconBtn, { borderColor: c.borderSubtle }]}>
               <Ionicons name={mode === 'dark' ? 'sunny-outline' : 'moon-outline'} size={18} color={c.textPrimary} />
+            </Pressable>
+            <Pressable testID="settings-button" onPress={() => router.push('/settings')} style={[styles.iconBtn, { borderColor: c.borderSubtle }]}>
+              <Ionicons name="settings-outline" size={18} color={c.textPrimary} />
             </Pressable>
             <Pressable
               testID="logout-button"
@@ -165,6 +150,18 @@ export default function Dashboard() {
               <Ionicons name="log-out-outline" size={18} color={c.textPrimary} />
             </Pressable>
           </View>
+        </View>
+
+        <View style={{ height: 24 }} />
+
+        <View style={[styles.guideBox, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+          <Text style={[styles.section, { color: c.textPrimary }]}>LAUNCH GUIDE</Text>
+          <GuideStep done={trips.length > 0} label="Create a trip" />
+          <GuideStep done={wardrobe.filter((w) => w.category === 'top').length >= 3} label="Add 3 tops" />
+          <GuideStep done={wardrobe.filter((w) => w.category === 'bottom').length >= 3} label="Add 3 bottoms" />
+          <GuideStep done={wardrobe.filter((w) => w.category === 'layer').length >= 3} label="Add 3 layers" />
+          <GuideStep done={Boolean(selected && selected.grid.filter(Boolean).length === 9)} label="Fill the grid" />
+          <GuideStep done={Boolean(selected && selected.grid.filter(Boolean).length === 9)} label="Review outfits and pack" />
         </View>
 
         <View style={{ height: 24 }} />
@@ -394,6 +391,16 @@ function daysFromNow(d: string) {
   return Math.round((target - today.getTime()) / 86400000);
 }
 
+function GuideStep({ done, label }: { done: boolean; label: string }) {
+  const { c } = useTheme();
+  return (
+    <View style={styles.guideStep}>
+      <Ionicons name={done ? 'checkmark-circle' : 'ellipse-outline'} size={17} color={done ? c.accent : c.textTertiary} />
+      <Text style={{ color: done ? c.textPrimary : c.textSecondary, fontSize: 13 }}>{label}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { padding: 24, paddingTop: 16, paddingBottom: 48 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
@@ -439,6 +446,8 @@ const styles = StyleSheet.create({
   cta: { borderWidth: 1, borderRadius: 4, padding: 16, alignItems: 'center' },
   ctaText: { fontSize: 13, letterSpacing: 2, fontWeight: '600' },
   climateBox: { borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 12 },
+  guideBox: { borderWidth: 1, borderRadius: 8, padding: 14, gap: 10 },
+  guideStep: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   proBadge: {
     flexDirection: 'row', alignItems: 'center',
     height: 36, paddingHorizontal: 12, borderRadius: 4, borderWidth: 1,

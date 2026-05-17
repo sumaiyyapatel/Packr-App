@@ -3,6 +3,7 @@ import { View, Text, Pressable, StyleSheet, ScrollView, useWindowDimensions } fr
 import { useRouter } from 'expo-router';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
+import { trackEvent } from '../../src/lib/analytics';
 
 function MiniGrid({ accent, border }: { accent: string; border: string }) {
   const cells = Array.from({ length: 9 }, (_, i) => i);
@@ -39,6 +40,7 @@ export default function Explainer() {
 
   const handleNext = async () => {
     await finishOnboarding();
+    trackEvent('onboarding_completed');
     router.replace('/onboarding/trip-create');
   };
 
@@ -54,7 +56,7 @@ export default function Explainer() {
       <View style={{ height: 32 }} />
       <Text style={[styles.body, { color: c.textSecondary }]}>
         Pick 3 tops, 3 bottoms, and 3 layers. The Sudoku rule lets every column combine with every other,
-        producing 3 × 3 × 3 = 27 unique outfits.
+        producing 3 x 3 x 3 = 27 unique outfits.
       </Text>
 
       <View style={{ height: 24 }} />

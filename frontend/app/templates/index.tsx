@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -19,16 +19,28 @@ export default function TemplatesIndex() {
   const router = useRouter();
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState('');
+  const [climate, setClimate] = useState('');
+  const [source, setSource] = useState<'all' | 'official' | 'community'>('all');
 
   useEffect(() => {
+    const timer = setTimeout(() => {
     (async () => {
       try {
-        const r = await api.get('/templates');
+        const r = await api.get('/templates', {
+          params: {
+            q: q.trim() || undefined,
+            climate: climate || undefined,
+            source,
+          },
+        });
         setTemplates(r.data);
       } catch {}
       setLoading(false);
     })();
-  }, []);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [q, climate, source]);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
@@ -52,6 +64,35 @@ export default function TemplatesIndex() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 48, gap: 16 }}>
+          <TextInput
+            value={q}
+            onChangeText={setQ}
+            placeholder="Search destination, season, style"
+            placeholderTextColor={c.textTertiary}
+            style={[styles.search, { color: c.textPrimary, borderColor: c.borderSubtle, backgroundColor: c.surface }]}
+          />
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+            {(['all', 'official', 'community'] as const).map((item) => (
+              <Pressable
+                key={item}
+                onPress={() => setSource(item)}
+                style={[styles.filterChip, { borderColor: source === item ? c.accent : c.borderSubtle, backgroundColor: source === item ? c.accent : 'transparent' }]}
+              >
+                <Text style={{ color: source === item ? c.bg : c.textSecondary, fontSize: 11, fontWeight: '800' }}>{item.toUpperCase()}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+            {['', 'cold', 'cool', 'mild', 'warm', 'tropical'].map((item) => (
+              <Pressable
+                key={item || 'any'}
+                onPress={() => setClimate(item)}
+                style={[styles.filterChip, { borderColor: climate === item ? c.accent : c.borderSubtle, backgroundColor: climate === item ? c.accent : 'transparent' }]}
+              >
+                <Text style={{ color: climate === item ? c.bg : c.textSecondary, fontSize: 11, fontWeight: '800' }}>{(item || 'any climate').toUpperCase()}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
           {templates.map((t) => (
             <Pressable
               testID={`template-card-${t.id}`}
@@ -137,6 +178,8 @@ const styles = StyleSheet.create({
   kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
   title: { fontSize: 24, fontWeight: '700', letterSpacing: -1 },
   card: { borderWidth: 1, borderRadius: 8, padding: 16, gap: 4 },
+  search: { borderWidth: 1, borderRadius: 8, minHeight: 44, paddingHorizontal: 12 },
+  filterChip: { height: 34, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center' },
   climateChip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999,

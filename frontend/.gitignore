@@ -5,11 +5,19 @@ node_modules/
 
 # Expo
 .expo/
+.expo-home/
 dist/
 web-build/
 expo-env.d.ts
+google-services.json
+
+# caches
+.metro-cache/
+.codex-logs/
+.ruff_cache/
 
 # Native
+android/
 .kotlin/
 *.orig.*
 *.jks
@@ -31,6 +39,9 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
+.env.*
+!.env.example
 .env*.local
 
 # typescript

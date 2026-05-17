@@ -104,9 +104,10 @@ class TestTemplatesPublic:
 class TestTemplatesAuth:
     @staticmethod
     def _nine_items():
+        slot_categories = ["top", "bottom", "layer", "bottom", "layer", "top", "layer", "top", "bottom"]
         return [
             {"name": f"TEST_item_{i}",
-             "category": ["top", "bottom", "layer"][i % 3],
+             "category": slot_categories[i],
              "colors": ["#123456"],
              "tags": ["casual"]}
             for i in range(9)

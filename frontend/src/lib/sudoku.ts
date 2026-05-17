@@ -1,57 +1,70 @@
 import { WardrobeItem } from './api';
 
 /**
- * The 3x3 grid:
- *  Rows are indexed 0..2 (each row has 3 slots), but in our app each slot
- *  holds a wardrobe item of a fixed CATEGORY by column:
- *    col 0 = top, col 1 = bottom, col 2 = layer
- *  So row r = an outfit (top, bottom, layer).
+ * Slots follow the rotating Sudoku packing layout:
+ *   row 1 = top, bottom, layer
+ *   row 2 = bottom, layer, top
+ *   row 3 = layer, top, bottom
  *
- * The "Sudoku method" produces 27 outfits by picking one row of each column
- * cell — i.e., for each combination (top_i, bottom_j, layer_k), we get an outfit.
- * That is 3 * 3 * 3 = 27 unique outfits.
+ * This keeps every row, column, and diagonal category-complete while still
+ * allowing 3 * 3 * 3 = 27 generated outfits.
  */
 
+export type GridCategory = 'top' | 'bottom' | 'layer';
+
 export type Outfit = {
-  index: number; // 0..26
+  index: number;
+  key: string;
   topId: string | null;
   bottomId: string | null;
   layerId: string | null;
-  // row/col indices (1-based in display)
-  topRow: number;
-  bottomRow: number;
-  layerRow: number;
+  topSlot: number;
+  bottomSlot: number;
+  layerSlot: number;
 };
 
-export const CATEGORY_BY_COL: Array<'top' | 'bottom' | 'layer'> = ['top', 'bottom', 'layer'];
+export const CATEGORY_BY_SLOT: GridCategory[] = [
+  'top',
+  'bottom',
+  'layer',
+  'bottom',
+  'layer',
+  'top',
+  'layer',
+  'top',
+  'bottom',
+];
 
 export function slotIndex(row: number, col: number) {
   return row * 3 + col;
 }
 
-export function categoryForSlot(slot: number): 'top' | 'bottom' | 'layer' {
-  return CATEGORY_BY_COL[slot % 3];
+export function categoryForSlot(slot: number): GridCategory {
+  return CATEGORY_BY_SLOT[slot];
 }
 
 export function generate27Outfits(grid: (string | null)[]): Outfit[] {
-  // grid is a flat array of 9: [r0c0,r0c1,r0c2, r1c0,r1c1,r1c2, r2c0,r2c1,r2c2]
-  const tops = [grid[0], grid[3], grid[6]]; // col 0
-  const bottoms = [grid[1], grid[4], grid[7]]; // col 1
-  const layers = [grid[2], grid[5], grid[8]]; // col 2
+  const tops = [0, 5, 7].map((slot) => ({ id: grid[slot] ?? null, slot }));
+  const bottoms = [1, 3, 8].map((slot) => ({ id: grid[slot] ?? null, slot }));
+  const layers = [2, 4, 6].map((slot) => ({ id: grid[slot] ?? null, slot }));
 
   const outfits: Outfit[] = [];
   let idx = 0;
   for (let i = 0; i < 3; i++) {
     for (let j = 0; j < 3; j++) {
       for (let k = 0; k < 3; k++) {
+        const topId = tops[i].id;
+        const bottomId = bottoms[j].id;
+        const layerId = layers[k].id;
         outfits.push({
           index: idx++,
-          topId: tops[i] ?? null,
-          bottomId: bottoms[j] ?? null,
-          layerId: layers[k] ?? null,
-          topRow: i + 1,
-          bottomRow: j + 1,
-          layerRow: k + 1,
+          key: [topId, bottomId, layerId].map((id) => id || 'empty').join('|'),
+          topId,
+          bottomId,
+          layerId,
+          topSlot: tops[i].slot,
+          bottomSlot: bottoms[j].slot,
+          layerSlot: layers[k].slot,
         });
       }
     }
@@ -68,14 +81,6 @@ export function gridProgress(grid: (string | null)[]) {
   return filled / 9;
 }
 
-/**
- * Conflict checker:
- *  - Each column must hold its expected category (top/bottom/layer).
- *    If a wrong-category item is placed, mark it as a conflict.
- *  - "Strict compatibility" warning: surface items whose tag set is
- *    incompatible with another item (e.g., #Formal vs #Beach).
- *    For MVP we use an opposites map.
- */
 const OPPOSITE_TAGS: Record<string, string[]> = {
   formal: ['beach', 'gym'],
   beach: ['formal', 'business'],
@@ -86,7 +91,7 @@ const OPPOSITE_TAGS: Record<string, string[]> = {
 };
 
 export type ConflictReport = {
-  slotConflicts: Record<number, string>; // slot index -> reason
+  slotConflicts: Record<number, string>;
   hasConflicts: boolean;
 };
 
@@ -96,19 +101,17 @@ export function checkConflicts(
 ): ConflictReport {
   const slotConflicts: Record<number, string> = {};
 
-  // Wrong category check
-  for (let s = 0; s < 9; s++) {
-    const id = grid[s];
+  for (let slot = 0; slot < 9; slot++) {
+    const id = grid[slot];
     if (!id) continue;
     const item = itemsById[id];
     if (!item) continue;
-    const expected = categoryForSlot(s);
+    const expected = categoryForSlot(slot);
     if (item.category !== expected) {
-      slotConflicts[s] = `Expected ${expected}, found ${item.category}`;
+      slotConflicts[slot] = `Expected ${expected}, found ${item.category}`;
     }
   }
 
-  // Tag compatibility (only between filled items)
   const filled = grid
     .map((id, slot) => ({ id, slot }))
     .filter((x) => x.id) as { id: string; slot: number }[];
@@ -116,16 +119,19 @@ export function checkConflicts(
   for (const a of filled) {
     const ai = itemsById[a.id];
     if (!ai) continue;
-    const aTags = (ai.tags || []).map((t) => t.toLowerCase().replace('#', ''));
+    const aCategory = categoryForSlot(a.slot);
+    const aTags = (ai.tags || []).map((tag) => tag.toLowerCase().replace('#', ''));
     for (const b of filled) {
       if (b.slot === a.slot) continue;
       const bi = itemsById[b.id];
       if (!bi) continue;
-      const bTags = (bi.tags || []).map((t) => t.toLowerCase().replace('#', ''));
-      for (const t of aTags) {
-        const opps = OPPOSITE_TAGS[t] || [];
-        if (bTags.some((bt) => opps.includes(bt))) {
-          slotConflicts[a.slot] = slotConflicts[a.slot] || `#${t} not compatible with another item`;
+      if (aCategory === categoryForSlot(b.slot)) continue;
+      const bTags = (bi.tags || []).map((tag) => tag.toLowerCase().replace('#', ''));
+      for (const tag of aTags) {
+        const opposites = OPPOSITE_TAGS[tag] || [];
+        if (bTags.some((otherTag) => opposites.includes(otherTag))) {
+          slotConflicts[a.slot] =
+            slotConflicts[a.slot] || `#${tag} not compatible with ${bi.name}`;
         }
       }
     }
@@ -139,7 +145,9 @@ export function suggestOccasion(
   itemsById: Record<string, WardrobeItem>
 ): string {
   const ids = [outfit.topId, outfit.bottomId, outfit.layerId].filter(Boolean) as string[];
-  const tags = ids.flatMap((id) => itemsById[id]?.tags || []).map((t) => t.toLowerCase().replace('#', ''));
+  const tags = ids
+    .flatMap((id) => itemsById[id]?.tags || [])
+    .map((tag) => tag.toLowerCase().replace('#', ''));
   if (tags.includes('formal') || tags.includes('business')) return 'Formal';
   if (tags.includes('beach') || tags.includes('tropical')) return 'Travel';
   if (tags.includes('gym')) return 'Active';
