@@ -1,4 +1,7 @@
+import base64
+import io
 import uuid
+from PIL import Image
 
 
 def _headers(token):
@@ -42,6 +45,13 @@ def _trip_with_grid(api_url, session, headers):
     return r.json()
 
 
+def _image_payload():
+    img = Image.new("RGB", (96, 120), (141, 163, 153))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
 def test_suggestions_stats_invites_and_reflections(api_url, session):
     headers = _headers(_register(api_url, session))
     trip = _trip_with_grid(api_url, session, headers)
@@ -79,13 +89,26 @@ def test_challenges_trending_and_votes(api_url, session):
     headers = _headers(_register(api_url, session))
     trip = _trip_with_grid(api_url, session, headers)
 
+    r = session.post(api_url + "/uploads/community-post-image", json={"image": _image_payload()}, headers=headers)
+    assert r.status_code == 200, r.text
+    upload = r.json()
+
     r = session.post(
         api_url + "/community/posts",
-        json={"trip_id": trip["id"], "title": "Launch screenshot", "caption": "challenge"},
+        json={
+            "trip_id": trip["id"],
+            "title": "Launch screenshot",
+            "caption": "challenge",
+            "image_url": upload["url"],
+            "image_width": upload["width"],
+            "image_height": upload["height"],
+        },
         headers=headers,
     )
     assert r.status_code == 200, r.text
-    post_id = r.json()["id"]
+    post = r.json()
+    post_id = post["id"]
+    assert post["image_url"] == upload["url"]
 
     r = session.get(api_url + "/community/challenges", headers=headers)
     assert r.status_code == 200, r.text
@@ -98,3 +121,23 @@ def test_challenges_trending_and_votes(api_url, session):
     r = session.get(api_url + "/community/trending", params={"destination": "Tokyo"}, headers=headers)
     assert r.status_code == 200, r.text
     assert any(post["id"] == post_id for post in r.json())
+
+
+def test_grid_index_checklist_keys_are_removed(api_url, session):
+    headers = _headers(_register(api_url, session))
+    trip = _trip_with_grid(api_url, session, headers)
+    item_id = trip["grid"][0]
+
+    r = session.put(api_url + f"/trips/{trip['id']}/checklist", json={"item_key": "grid:0", "checked": True}, headers=headers)
+    assert r.status_code == 200, r.text
+    r = session.put(api_url + f"/trips/{trip['id']}/checklist", json={"item_key": f"grid:{item_id}", "checked": True}, headers=headers)
+    assert r.status_code == 200, r.text
+
+    r = session.delete(api_url + f"/wardrobe/{item_id}", headers=headers)
+    assert r.status_code == 200, r.text
+
+    r = session.get(api_url + f"/trips/{trip['id']}", headers=headers)
+    assert r.status_code == 200, r.text
+    state = r.json()["checklist_state"]
+    assert "grid:0" not in state
+    assert f"grid:{item_id}" not in state

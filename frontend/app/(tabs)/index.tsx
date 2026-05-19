@@ -7,13 +7,14 @@ import {
   Pressable,
   RefreshControl,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, Trip, TripInvite, TripNudge, TripStats, WardrobeItem } from '../../src/lib/api';
+import { api, Template, Trip, TripInvite, TripNudge, TripStats, WardrobeItem } from '../../src/lib/api';
 import { gridProgress, isGridComplete } from '../../src/lib/sudoku';
 import { checkClimateFit } from '../../src/lib/climate';
 
@@ -43,6 +44,7 @@ export default function Dashboard() {
   const refreshAll = useStore((s) => s.refreshAll);
   const selectedTripId = useStore((s) => s.selectedTripId);
   const setSelectedTrip = useStore((s) => s.setSelectedTrip);
+  const upsertTrip = useStore((s) => s.upsertTrip);
   const removeTrip = useStore((s) => s.removeTrip);
   const logout = useStore((s) => s.logout);
   const user = useStore((s) => s.user);
@@ -53,6 +55,7 @@ export default function Dashboard() {
   const [nudges, setNudges] = useState<TripNudge[]>([]);
   const [invites, setInvites] = useState<TripInvite[]>([]);
   const [inviteBusy, setInviteBusy] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -160,6 +163,27 @@ export default function Dashboard() {
     router.push(nudge.action_route as any);
   };
 
+  const loadSampleCapsule = async () => {
+    if (!selected) return;
+    setDemoLoading(true);
+    try {
+      const r = await api.get<Template[]>('/templates', {
+        params: { q: 'Lisbon', source: 'official' },
+      });
+      const template =
+        r.data.find((item) => item.title.toLowerCase().includes('lisbon')) || r.data[0];
+      if (!template) throw new Error('No official templates available');
+      const applied = await api.post(`/templates/${template.id}/apply`, { trip_id: selected.id });
+      upsertTrip(applied.data);
+      await refreshAll();
+      router.push('/(tabs)/grid');
+    } catch {
+      Alert.alert('Sample capsule unavailable', 'Try again after templates finish loading.');
+    } finally {
+      setDemoLoading(false);
+    }
+  };
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
       <ScrollView
@@ -207,6 +231,13 @@ export default function Dashboard() {
           <GuideStep done={Boolean(selected && selected.grid.filter(Boolean).length === 9)} label="Fill the grid" />
           <GuideStep done={Boolean(selected && selected.grid.filter(Boolean).length === 9)} label="Review outfits and pack" />
         </View>
+
+        {selected && wardrobe.length === 0 && (
+          <>
+            <View style={{ height: 12 }} />
+            <SampleCapsuleCard onLoadDemo={loadSampleCapsule} loading={demoLoading} />
+          </>
+        )}
 
         <View style={{ height: 24 }} />
 
@@ -503,6 +534,37 @@ function GuideStep({ done, label }: { done: boolean; label: string }) {
   );
 }
 
+function SampleCapsuleCard({ onLoadDemo, loading }: { onLoadDemo: () => void; loading: boolean }) {
+  const { c } = useTheme();
+  return (
+    <View style={[styles.sampleCard, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+      <Ionicons name="sparkles-outline" size={30} color={c.accent} />
+      <View style={{ flex: 1 }}>
+        <Text style={{ color: c.textPrimary, fontSize: 16, fontWeight: '900' }}>
+          Preview a packed trip
+        </Text>
+        <Text style={{ color: c.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 4 }}>
+          Load a sample capsule to see the grid, lookbook, and checklist before adding photos.
+        </Text>
+      </View>
+      <Pressable
+        onPress={onLoadDemo}
+        disabled={loading}
+        style={({ pressed }) => [
+          styles.demoBtn,
+          { backgroundColor: c.accent, opacity: loading ? 0.6 : pressed ? 0.82 : 1 },
+        ]}
+      >
+        {loading ? (
+          <ActivityIndicator color={c.bg} />
+        ) : (
+          <Text style={{ color: c.bg, fontSize: 11, fontWeight: '900' }}>LOAD</Text>
+        )}
+      </Pressable>
+    </View>
+  );
+}
+
 function ScoreMeta({ label, value }: { label: string; value: string }) {
   const { c } = useTheme();
   return (
@@ -595,6 +657,8 @@ const styles = StyleSheet.create({
   climateBox: { borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 12 },
   guideBox: { borderWidth: 1, borderRadius: 8, padding: 14, gap: 10 },
   guideStep: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  sampleCard: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderRadius: 8, padding: 14 },
+  demoBtn: { minWidth: 68, height: 38, borderRadius: 6, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
   proBadge: {
     flexDirection: 'row', alignItems: 'center',
     height: 36, paddingHorizontal: 12, borderRadius: 4, borderWidth: 1,

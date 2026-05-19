@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: packr-backend
+    runtime: docker
+    rootDir: backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: PACKR_ENV
+        value: production
+      - key: DB_NAME
+        value: packr
+      - key: FIREBASE_AUTH_STRICT
+        value: "1"
+      - key: ALLOW_LEGACY_AUTH
+        value: "0"
+      - key: MONGODB_URI
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://packr-backend.onrender.com

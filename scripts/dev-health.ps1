@@ -20,20 +20,16 @@ function Write-Check {
 }
 
 try {
-  $api = Invoke-RestMethod -Uri 'http://localhost:8000/api/' -Method Get -TimeoutSec 8
+  $api = Invoke-RestMethod -Uri 'http://localhost:8000/api/health' -Method Get -TimeoutSec 8
   Write-Check 'backend' ($api.status -eq 'ok') 'http://localhost:8000/api/'
+  Write-Check 'database' ($api.database.status -eq 'ok') "$($api.database.provider):$($api.database.name)"
+  $authReady = [bool]$api.auth.firebase_ready -or [bool]$api.auth.legacy_enabled
+  Write-Check 'auth' $authReady "firebase ready: $($api.auth.firebase_ready); legacy enabled: $($api.auth.legacy_enabled)"
+  if (-not $authReady) { $ok = $false }
 } catch {
   $ok = $false
   Write-Check 'backend' $false 'start: cd backend; uvicorn server:app --host 0.0.0.0 --port 8000'
-}
-
-try {
-  $mongo = Test-NetConnection -ComputerName '127.0.0.1' -Port 27017 -WarningAction SilentlyContinue
-  Write-Check 'mongodb' $mongo.TcpTestSucceeded '127.0.0.1:27017'
-  if (-not $mongo.TcpTestSucceeded) { $ok = $false }
-} catch {
-  $ok = $false
-  Write-Check 'mongodb' $false 'MongoDB is not reachable'
+  Write-Check 'database' $false 'backend /api/health could not ping MongoDB'
 }
 
 if (-not (Test-Path -LiteralPath $adbPath)) {

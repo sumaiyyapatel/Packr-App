@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -14,6 +14,7 @@ import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { captureRef } from 'react-native-view-shot';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
 import { api, CommunityChallenge, CommunityPost, CommunitySnapshotItem, getApiErrorMessage, resolveApiAssetUrl, SocialProfile, Trip } from '../../src/lib/api';
@@ -40,6 +41,7 @@ export default function CommunityScreen() {
   const { c } = useTheme();
   const user = useStore((s) => s.user);
   const trips = useStore((s) => s.trips);
+  const wardrobe = useStore((s) => s.wardrobe);
   const selectedTripId = useStore((s) => s.selectedTripId);
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0] || null;
   const [scope, setScope] = useState<FeedScope>('public');
@@ -54,6 +56,23 @@ export default function CommunityScreen() {
   const [profile, setProfile] = useState<SocialProfile | null>(null);
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(new Set());
   const [challenges, setChallenges] = useState<CommunityChallenge[]>([]);
+  const shareCardRef = useRef<View>(null);
+
+  const itemsById = useMemo(() => {
+    const map: Record<string, CommunitySnapshotItem> = {};
+    for (const item of wardrobe) {
+      map[item.id] = {
+        slot: 0,
+        name: item.name,
+        category: item.category,
+        image: item.image,
+        colors: item.colors,
+        tags: item.tags,
+        weight_kg: item.weight_kg,
+      };
+    }
+    return map;
+  }, [wardrobe]);
 
   const selectedTripComplete = useMemo(() => {
     return Boolean(trip?.grid?.length === 9 && trip.grid.every(Boolean));
@@ -138,11 +157,23 @@ export default function CommunityScreen() {
     }
     setPosting(true);
     try {
+      if (!shareCardRef.current) {
+        throw new Error('Share card is not ready');
+      }
+      const image = await captureRef(shareCardRef.current, {
+        format: 'jpg',
+        quality: 0.86,
+        result: 'data-uri',
+      });
+      const upload = await api.post('/uploads/community-post-image', { image });
       const r = await api.post('/community/posts', {
         trip_id: trip.id,
         title: `${trip.destination} packing post`,
         caption,
         visibility,
+        image_url: upload.data.url,
+        image_width: upload.data.width,
+        image_height: upload.data.height,
       });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       setCaption('');
@@ -363,6 +394,10 @@ export default function CommunityScreen() {
             ]}
           />
 
+          {trip && selectedTripComplete ? (
+            <ShareGridCard ref={shareCardRef} trip={trip} itemsById={itemsById} />
+          ) : null}
+
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.visibilityRow}>
             {VISIBILITIES.map((item) => {
               const active = visibility === item.id;
@@ -543,6 +578,64 @@ function ProfileStat({ label, value }: { label: string; value: number }) {
     </View>
   );
 }
+
+const ShareGridCard = React.forwardRef<View, { trip: Trip; itemsById: Record<string, CommunitySnapshotItem> }>(
+  function ShareGridCard({ trip, itemsById }, ref) {
+    const { c } = useTheme();
+    return (
+      <View
+        ref={ref}
+        collapsable={false}
+        style={[styles.sharePreviewCard, { backgroundColor: c.bg, borderColor: c.borderSubtle }]}
+      >
+        <View style={styles.sharePreviewHeader}>
+          <View>
+            <Text style={{ color: c.accent, fontSize: 11, letterSpacing: 2, fontWeight: '900' }}>PACKR GRID</Text>
+            <Text style={{ color: c.textPrimary, fontSize: 24, fontWeight: '900', marginTop: 2 }} numberOfLines={1}>
+              {trip.destination}
+            </Text>
+          </View>
+          <Text style={{ color: c.textTertiary, fontSize: 11, fontWeight: '800' }}>
+            {tripDaysLabel(trip)}
+          </Text>
+        </View>
+        <View style={[styles.sharePreviewGrid, { borderColor: c.borderSubtle }]}>
+          {[0, 1, 2].map((row) => (
+            <View key={row} style={styles.gridRow}>
+              {[0, 1, 2].map((col) => {
+                const slot = row * 3 + col;
+                const itemId = trip.grid[slot];
+                const item = itemId ? itemsById[itemId] : null;
+                const meta = CATEGORY_META[item?.category || categoryForSlot(slot)];
+                return (
+                  <View
+                    key={slot}
+                    style={[styles.sharePreviewSlot, { backgroundColor: meta.soft, borderColor: meta.color + '66' }]}
+                  >
+                    <View style={[styles.previewAccent, { backgroundColor: meta.color }]} />
+                    {item?.image ? (
+                      <Image source={{ uri: resolveApiAssetUrl(item.image) }} style={styles.sharePreviewImage} contentFit="contain" />
+                    ) : (
+                      <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={22} color={meta.color} />
+                    )}
+                    <Text style={{ color: c.textPrimary, fontSize: 9, fontWeight: '800', marginTop: 3 }} numberOfLines={1}>
+                      {item?.name || meta.short}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          ))}
+        </View>
+        <View style={styles.sharePreviewFooter}>
+          <Text style={{ color: c.textPrimary, fontSize: 12, fontWeight: '900' }}>9 items</Text>
+          <Text style={{ color: c.textPrimary, fontSize: 12, fontWeight: '900' }}>27 outfits</Text>
+          <Text style={{ color: c.accent, fontSize: 12, fontWeight: '900' }}>packr</Text>
+        </View>
+      </View>
+    );
+  }
+);
 
 function ChallengeCard({
   challenge,
@@ -959,6 +1052,27 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 10,
   },
+  sharePreviewCard: {
+    width: '100%',
+    aspectRatio: 4 / 5,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 12,
+  },
+  sharePreviewHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 },
+  sharePreviewGrid: { flex: 1, borderWidth: 1, borderRadius: 10, overflow: 'hidden', marginTop: 12 },
+  sharePreviewSlot: {
+    flex: 1,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    overflow: 'hidden',
+    padding: 5,
+  },
+  sharePreviewImage: { width: '86%', height: '74%' },
+  sharePreviewFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
   shareButton: {
     height: 44,
     borderRadius: 8,

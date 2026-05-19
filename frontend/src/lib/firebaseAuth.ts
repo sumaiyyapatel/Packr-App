@@ -107,7 +107,23 @@ export async function loginWithNativeGoogle() {
   GoogleSignin.configure({ webClientId, offlineAccess: false });
   await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
 
-  const response = await GoogleSignin.signIn();
+  let response;
+  try {
+    response = await GoogleSignin.signIn();
+  } catch (error: unknown) {
+    const googleError = error as { code?: string; message?: string };
+    const message = googleError.message || '';
+    if (
+      googleError.code === '10' ||
+      googleError.code === 'DEVELOPER_ERROR' ||
+      /DEVELOPER_ERROR|Developer console is not set up correctly/i.test(message)
+    ) {
+      throw new Error(
+        'Google Sign-In Android config mismatch. In Firebase, enable Google sign-in, verify package com.inkspace.packr and the APK SHA-1, download a fresh google-services.json, then rebuild and reinstall the app.'
+      );
+    }
+    throw error;
+  }
   if (response.type !== 'success') throw new Error('Google sign-in was cancelled');
 
   const idToken = response.data.idToken;

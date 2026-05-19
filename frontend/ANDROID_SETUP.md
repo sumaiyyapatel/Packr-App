@@ -35,7 +35,7 @@ npm run dev:health
 This checks:
 
 - backend on `localhost:8000`
-- MongoDB on `127.0.0.1:27017`
+- MongoDB through backend `/api/health` (local or Atlas)
 - connected Android device
 - `adb reverse tcp:8000 tcp:8000`
 - phone access to `http://127.0.0.1:8000/api/`

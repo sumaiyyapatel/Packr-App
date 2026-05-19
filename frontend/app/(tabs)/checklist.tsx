@@ -37,6 +37,7 @@ export default function Checklist() {
   const selectedAirlineId = useStore((s) => s.selectedAirlineId);
   const setSelectedAirline = useStore((s) => s.setSelectedAirline);
   const upsertTrip = useStore((s) => s.upsertTrip);
+  const toggleChecklistOptimistic = useStore((s) => s.toggleChecklistOptimistic);
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0];
   const [showAdd, setShowAdd] = useState(false);
 
@@ -59,16 +60,10 @@ export default function Checklist() {
         .filter((x) => x.id) as { id: string; i: number }[])
     : [];
 
-  const onToggle = async (key: string, checked: boolean) => {
+  const onToggle = (key: string) => {
     if (!trip) return;
     Haptics.selectionAsync().catch(() => {});
-    try {
-      const r = await api.put(`/trips/${trip.id}/checklist`, {
-        item_key: key,
-        checked: !checked,
-      });
-      upsertTrip(r.data);
-    } catch {}
+    toggleChecklistOptimistic(trip.id, key);
   };
 
   const onRemoveExtra = async (id: string) => {
@@ -222,7 +217,7 @@ export default function Checklist() {
                 key={key}
                 testID={`check-grid-${i}`}
                 checked={checked}
-                onToggle={() => onToggle(key, checked)}
+                onToggle={() => onToggle(key)}
                 title={item.name}
                 subtitle={`${item.category.toUpperCase()} · slot ${i + 1}`}
                 weight={item.weight_kg}
@@ -253,7 +248,7 @@ export default function Checklist() {
                 key={e.key}
                 testID={`check-${e.key}`}
                 checked={checked}
-                onToggle={() => onToggle(e.key, checked)}
+                onToggle={() => onToggle(e.key)}
                 title={e.name}
                 subtitle={e.category.toUpperCase()}
                 weight={e.weight}

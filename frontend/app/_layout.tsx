@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Stack, useRouter, useSegments } from 'expo-router';
+import { Stack, useRootNavigationState, useRouter, useSegments } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -14,6 +14,7 @@ function RootGate() {
   const { c, mode } = useTheme();
   const router = useRouter();
   const segments = useSegments();
+  const rootNavigationState = useRootNavigationState();
   const hydrated = useStore((s) => s.hydrated);
   const user = useStore((s) => s.user);
   const onboarded = useStore((s) => s.onboarded);
@@ -27,7 +28,7 @@ function RootGate() {
   }, [hydrate]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!rootNavigationState?.key || !hydrated || !fontsLoaded) return;
     const inAuth = segments[0] === '(auth)';
     const inTabs = segments[0] === '(tabs)';
     const inTemplates = segments[0] === 'templates';
@@ -47,15 +48,7 @@ function RootGate() {
       return;
     }
     if (!inTabs && !inTemplates && !['settings', 'outfits'].includes(String(segments[0]))) router.replace('/(tabs)');
-  }, [hydrated, user, onboarded, trips.length, segments, router]);
-
-  if (!hydrated || !fontsLoaded) {
-    return (
-      <View style={{ flex: 1, backgroundColor: c.bg, alignItems: 'center', justifyContent: 'center' }}>
-        <ActivityIndicator color={c.accent} />
-      </View>
-    );
-  }
+  }, [rootNavigationState?.key, hydrated, fontsLoaded, user, onboarded, trips.length, segments, router]);
 
   return (
     <>
@@ -68,6 +61,23 @@ function RootGate() {
         <Stack.Screen name="outfits" />
         <Stack.Screen name="settings" options={{ presentation: 'modal' }} />
       </Stack>
+      {(!hydrated || !fontsLoaded) && (
+        <View
+          pointerEvents="auto"
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            bottom: 0,
+            left: 0,
+            backgroundColor: c.bg,
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <ActivityIndicator color={c.accent} />
+        </View>
+      )}
     </>
   );
 }

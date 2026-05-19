@@ -8,7 +8,9 @@ import os
 import logging
 import io
 import base64
+import json
 import re
+import asyncio
 from collections import deque
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
@@ -23,6 +25,16 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 from pymongo.errors import DuplicateKeyError
 
 try:
+    from rembg import remove as rembg_remove
+except Exception:
+    rembg_remove = None
+
+try:
+    from colorthief import ColorThief
+except Exception:
+    ColorThief = None
+
+try:
     import firebase_admin
     from firebase_admin import auth as firebase_auth, credentials as firebase_credentials
 except Exception:
@@ -33,7 +45,7 @@ except Exception:
 ROOT_DIR = Path(__file__).parent
 env_path = ROOT_DIR / '.env'
 if env_path.exists():
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
 else:
     load_dotenv()  # Try loading from system environment
 
@@ -43,31 +55,69 @@ def env_bool(name: str, default: bool = False) -> bool:
         return default
     return raw.lower() in ('1', 'true', 'yes', 'on')
 
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f'{name} must be an integer')
+
+def first_env(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+def database_name_from_uri(uri: str) -> Optional[str]:
+    try:
+        parsed = urlparse(uri)
+    except Exception:
+        return None
+    name = unquote((parsed.path or '').strip('/'))
+    return name or None
+
+def resolve_backend_path(raw_path: str) -> str:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return str(path)
+    return str(ROOT_DIR / path)
+
 APP_ENV = os.environ.get('PACKR_ENV') or os.environ.get('APP_ENV') or os.environ.get('ENVIRONMENT') or 'development'
 IS_PRODUCTION = APP_ENV.lower() in ('prod', 'production')
 FEATURE_PRO_ENABLED = env_bool('FEATURE_PRO_ENABLED', False)
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', ROOT_DIR / 'uploads'))
 PUBLIC_UPLOAD_BASE_URL = os.environ.get('PUBLIC_UPLOAD_BASE_URL', '').rstrip('/')
 
-mongo_url = os.environ.get('MONGO_URL')
-if IS_PRODUCTION and not mongo_url:
-    raise ValueError('MONGO_URL environment variable must be set in production')
-mongo_url = mongo_url or 'mongodb://localhost:27017'
-client = AsyncIOMotorClient(mongo_url)
-db_name = os.environ.get('DB_NAME')
+MONGO_URL = first_env('MONGODB_URI', 'MONGO_URL', 'MONGO_URI')
+if IS_PRODUCTION and not MONGO_URL:
+    raise ValueError('MONGO_URL or MONGODB_URI must be set in production')
+MONGO_URL = MONGO_URL or 'mongodb://localhost:27017'
+db_name = first_env('DB_NAME', 'MONGODB_DB_NAME', 'MONGO_DB_NAME') or database_name_from_uri(MONGO_URL)
 if IS_PRODUCTION and not db_name:
-    raise ValueError('DB_NAME environment variable must be set in production')
+    raise ValueError('DB_NAME or a database name in MONGODB_URI must be set in production')
+MONGO_SERVER_SELECTION_TIMEOUT_MS = env_int('MONGO_SERVER_SELECTION_TIMEOUT_MS', 5000)
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    appname=os.environ.get('MONGO_APP_NAME', 'packr-api'),
+    serverSelectionTimeoutMS=MONGO_SERVER_SELECTION_TIMEOUT_MS,
+    uuidRepresentation='standard',
+)
 db = client[db_name or 'test_database']
+MONGO_PROVIDER = 'mongodb-atlas' if MONGO_URL.startswith('mongodb+srv://') or '.mongodb.net' in MONGO_URL else 'mongodb'
 
 JWT_SECRET = os.environ.get('JWT_SECRET')
-if IS_PRODUCTION and not JWT_SECRET:
+FIREBASE_AUTH_STRICT = env_bool('FIREBASE_AUTH_STRICT', IS_PRODUCTION)
+ALLOW_LEGACY_AUTH = env_bool('ALLOW_LEGACY_AUTH', not FIREBASE_AUTH_STRICT)
+if IS_PRODUCTION and ALLOW_LEGACY_AUTH:
+    raise ValueError('ALLOW_LEGACY_AUTH must be disabled in production')
+if ALLOW_LEGACY_AUTH and IS_PRODUCTION and not JWT_SECRET:
     raise ValueError('JWT_SECRET environment variable must be set in production')
 JWT_SECRET = JWT_SECRET or 'packr-dev-secret-change-in-prod'
 JWT_ALG = 'HS256'
 JWT_EXPIRE_DAYS = 30
-FIREBASE_AUTH_STRICT = os.environ.get('FIREBASE_AUTH_STRICT', '').lower() in ('1', 'true', 'yes')
-if IS_PRODUCTION and not FIREBASE_AUTH_STRICT:
-    raise ValueError('FIREBASE_AUTH_STRICT=1 is required in production')
 FIREBASE_AUTH_READY = False
 
 CORS_ORIGINS_RAW = os.environ.get('CORS_ORIGINS', '')
@@ -90,19 +140,23 @@ def init_firebase_auth() -> None:
         return
     project_id = os.environ.get('FIREBASE_PROJECT_ID')
     creds_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
-    creds_path = os.environ.get('FIREBASE_CREDENTIALS_PATH')
+    creds_b64 = os.environ.get('FIREBASE_CREDENTIALS_BASE64')
+    creds_path = os.environ.get('FIREBASE_CREDENTIALS_PATH') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
     try:
         cred = None
         if creds_json:
-            import json
             cred = firebase_credentials.Certificate(json.loads(creds_json))
+        elif creds_b64:
+            raw = base64.b64decode(creds_b64).decode('utf-8')
+            cred = firebase_credentials.Certificate(json.loads(raw))
         elif creds_path:
-            cred = firebase_credentials.Certificate(creds_path)
+            cred = firebase_credentials.Certificate(resolve_backend_path(creds_path))
+        options = {'projectId': project_id} if project_id else None
         if cred:
-            firebase_admin.initialize_app(cred, {'projectId': project_id} if project_id else None)
+            firebase_admin.initialize_app(cred, options)
             FIREBASE_AUTH_READY = True
-        elif project_id:
-            firebase_admin.initialize_app(options={'projectId': project_id})
+        elif project_id or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+            firebase_admin.initialize_app(options=options)
             FIREBASE_AUTH_READY = True
     except Exception as e:
         logging.getLogger(__name__).warning(f'Firebase Auth init skipped: {e}')
@@ -208,6 +262,10 @@ class CommunityPostCreate(BaseModel):
     title: Optional[str] = Field(default=None, max_length=80)
     caption: str = Field(default='', max_length=220)
     visibility: Literal['public', 'followers', 'private'] = 'public'
+    image_url: Optional[str] = None
+    image_width: int = 0
+    image_height: int = 0
+    dominant_colors: List[str] = Field(default_factory=list)
 
 class CommunityCommentCreate(BaseModel):
     text: str = Field(min_length=1, max_length=500)
@@ -368,16 +426,28 @@ async def get_or_create_firebase_user(decoded: dict) -> dict:
     if not uid:
         raise HTTPException(401, 'Invalid Firebase token')
     email = (decoded.get('email') or f'{uid}@firebase.local').lower()
+    provider = (decoded.get('firebase') or {}).get('sign_in_provider') or 'firebase'
     user = await db.users.find_one({'id': uid}, {'_id': 0})
     if user:
-        updates = {}
+        updates = {
+            'auth_provider': 'firebase',
+            'firebase_uid': uid,
+            'last_login_at': datetime.now(timezone.utc),
+        }
         if user.get('email') != email:
             updates['email'] = email
+        if decoded.get('email_verified') is not None:
+            updates['email_verified'] = bool(decoded.get('email_verified'))
+        if decoded.get('picture'):
+            updates['photo_url'] = decoded.get('picture')
+        if provider:
+            updates['firebase_provider'] = provider
+        if not user.get('name') and decoded.get('name'):
+            updates['name'] = decoded.get('name')
         if not user.get('airline_profiles'):
             updates['airline_profiles'] = DEFAULT_AIRLINES
-        if updates:
-            await db.users.update_one({'id': uid}, {'$set': updates})
-            user = await db.users.find_one({'id': uid}, {'_id': 0})
+        await db.users.update_one({'id': uid}, {'$set': updates})
+        user = await db.users.find_one({'id': uid}, {'_id': 0})
         return user
 
     user_doc = {
@@ -385,9 +455,15 @@ async def get_or_create_firebase_user(decoded: dict) -> dict:
         'email': email,
         'password_hash': '',
         'name': decoded.get('name'),
+        'auth_provider': 'firebase',
+        'firebase_uid': uid,
+        'firebase_provider': provider,
+        'email_verified': bool(decoded.get('email_verified', False)),
+        'photo_url': decoded.get('picture'),
         'is_pro': False,
         'airline_profiles': DEFAULT_AIRLINES,
         'created_at': datetime.now(timezone.utc),
+        'last_login_at': datetime.now(timezone.utc),
     }
     await db.users.insert_one(user_doc.copy())
     return user_doc
@@ -401,6 +477,11 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
         except Exception:
             if FIREBASE_AUTH_STRICT:
                 raise HTTPException(401, 'Invalid Firebase token')
+    elif FIREBASE_AUTH_STRICT:
+        raise HTTPException(503, 'Firebase Auth is not configured')
+
+    if not ALLOW_LEGACY_AUTH:
+        raise HTTPException(401, 'Firebase token required')
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
@@ -663,6 +744,20 @@ def clean_outfit_state_for_grid(trip: dict, grid: List[Optional[str]]) -> Dict[s
     }
     return {'favorites': favorites, 'occasion_tags': occasion_tags, 'outfit_plan': outfit_plan}
 
+def clean_checklist_state_for_grid(trip: dict, grid: List[Optional[str]]) -> Dict[str, bool]:
+    valid_grid_keys = {f'grid:{item_id}' for item_id in grid if item_id}
+    cleaned: Dict[str, bool] = {}
+    for key, value in (trip.get('checklist_state') or {}).items():
+        if key.startswith('grid:'):
+            suffix = key.split(':', 1)[1]
+            if suffix.isdigit():
+                continue
+            if key in valid_grid_keys:
+                cleaned[key] = bool(value)
+            continue
+        cleaned[key] = bool(value)
+    return cleaned
+
 async def validate_grid(grid: List[Optional[str]], user_id: str) -> None:
     if len(grid) != 9:
         raise HTTPException(400, 'Grid must have exactly 9 slots')
@@ -763,11 +858,7 @@ async def clear_invalid_grid_slots_for_item(item_id: str, category: str, user_id
         if not changed:
             continue
         clean_state = clean_outfit_state_for_grid(trip, grid)
-        checklist_state = {
-            key: value
-            for key, value in (trip.get('checklist_state') or {}).items()
-            if key != f'grid:{item_id}'
-        }
+        checklist_state = clean_checklist_state_for_grid(trip, grid)
         await db.trips.update_one(
             {'id': trip['id'], 'user_id': user_id},
             {'$set': {**clean_state, 'grid': grid, 'checklist_state': checklist_state}},
@@ -869,6 +960,8 @@ async def social_profile_for(uid: str, viewer_id: str) -> SocialProfile:
 # ========== AUTH ROUTES ==========
 @api_router.post("/auth/register", response_model=TokenResponse)
 async def register(payload: UserRegister):
+    if not ALLOW_LEGACY_AUTH:
+        raise HTTPException(status.HTTP_410_GONE, 'Password auth is disabled; use Firebase Auth')
     existing = await db.users.find_one({'email': payload.email.lower()})
     if existing:
         raise HTTPException(400, 'Email already registered')
@@ -886,8 +979,10 @@ async def register(payload: UserRegister):
 
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def login(payload: UserLogin):
+    if not ALLOW_LEGACY_AUTH:
+        raise HTTPException(status.HTTP_410_GONE, 'Password auth is disabled; use Firebase Auth')
     user = await db.users.find_one({'email': payload.email.lower()}, {'_id': 0})
-    if not user or not verify_password(payload.password, user['password_hash']):
+    if not user or not verify_password(payload.password, user.get('password_hash', '')):
         raise HTTPException(401, 'Invalid email or password')
     return TokenResponse(token=create_token(user['id']), user=user_public(user))
 
@@ -965,11 +1060,7 @@ async def delete_wardrobe_item(item_id: str, user: dict = Depends(get_current_us
     for trip in affected:
         grid = [None if slot == item_id else slot for slot in (trip.get('grid') or [])]
         clean_state = clean_outfit_state_for_grid(trip, grid)
-        checklist_state = {
-            key: value
-            for key, value in (trip.get('checklist_state') or {}).items()
-            if key != f'grid:{item_id}'
-        }
+        checklist_state = clean_checklist_state_for_grid(trip, grid)
         await db.trips.update_one(
             {'id': trip['id'], 'user_id': user['id']},
             {'$set': {**clean_state, 'grid': grid, 'checklist_state': checklist_state}}
@@ -1019,6 +1110,7 @@ async def update_grid(trip_id: str, payload: GridUpdate, user: dict = Depends(ge
     update_fields = {'grid': payload.grid}
     if payload.grid != existing.get('grid'):
         update_fields.update(clean_outfit_state_for_grid(existing, payload.grid))
+        update_fields['checklist_state'] = clean_checklist_state_for_grid(existing, payload.grid)
     await db.trips.update_one(
         {'id': trip_id, 'user_id': user['id']},
         {'$set': update_fields}
@@ -1243,40 +1335,59 @@ async def weather(latitude: float, longitude: float, start_date: Optional[str] =
         params['end_date'] = end_date
     else:
         params['forecast_days'] = 14
-    async with httpx.AsyncClient(timeout=10) as cli:
-        r = await cli.get('https://api.open-meteo.com/v1/forecast', params=params)
-        if r.status_code != 200 and start_date and end_date:
+    try:
+        return await cached_http_get_json('https://api.open-meteo.com/v1/forecast', params)
+    except HTTPException:
+        if start_date and end_date:
             fallback = dict(params)
             fallback.pop('start_date', None)
             fallback.pop('end_date', None)
             fallback['forecast_days'] = 14
-            r = await cli.get('https://api.open-meteo.com/v1/forecast', params=fallback)
-        if r.status_code != 200:
-            raise HTTPException(502, 'Weather service error')
-        return r.json()
+            return await cached_http_get_json('https://api.open-meteo.com/v1/forecast', fallback)
+        raise HTTPException(502, 'Weather service error')
 
 @api_router.get("/geocode")
 async def geocode(q: str):
     """City search via Open-Meteo geocoding."""
-    async with httpx.AsyncClient(timeout=10) as cli:
-        r = await cli.get('https://geocoding-api.open-meteo.com/v1/search', params={'name': q, 'count': 5, 'language': 'en'})
-        if r.status_code != 200:
-            raise HTTPException(502, 'Geocoding service error')
-        data = r.json()
-        results = []
-        for item in data.get('results', []):
-            results.append({
-                'name': item.get('name'),
-                'country': item.get('country'),
-                'admin1': item.get('admin1'),
-                'latitude': item.get('latitude'),
-                'longitude': item.get('longitude'),
-            })
-        return {'results': results}
+    data = await cached_http_get_json(
+        'https://geocoding-api.open-meteo.com/v1/search',
+        {'name': q, 'count': 5, 'language': 'en'},
+    )
+    results = []
+    for item in data.get('results', []):
+        results.append({
+            'name': item.get('name'),
+            'country': item.get('country'),
+            'admin1': item.get('admin1'),
+            'latitude': item.get('latitude'),
+            'longitude': item.get('longitude'),
+        })
+    return {'results': results}
 
 @api_router.get("/")
 async def root():
     return {'service': 'Packr', 'status': 'ok'}
+
+@api_router.get("/health")
+async def health():
+    try:
+        await db.command('ping')
+    except Exception:
+        raise HTTPException(
+            503,
+            {
+                'service': 'Packr',
+                'status': 'degraded',
+                'database': {'provider': MONGO_PROVIDER, 'name': db.name, 'status': 'error'},
+                'auth': {'firebase_ready': FIREBASE_AUTH_READY, 'legacy_enabled': ALLOW_LEGACY_AUTH},
+            },
+        )
+    return {
+        'service': 'Packr',
+        'status': 'ok',
+        'database': {'provider': MONGO_PROVIDER, 'name': db.name, 'status': 'ok'},
+        'auth': {'firebase_ready': FIREBASE_AUTH_READY, 'legacy_enabled': ALLOW_LEGACY_AUTH},
+    }
 
 # ========== IMAGE PROCESSING / UPLOADS ==========
 class PaletteRequest(BaseModel):
@@ -1285,6 +1396,30 @@ class PaletteRequest(BaseModel):
 FREE_TRIP_CAP = 2
 MAX_IMAGE_BYTES = 4 * 1024 * 1024  # 4 MB decoded
 RESAMPLE_LANCZOS = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS
+HTTP_JSON_CACHE: Dict[str, Dict[str, Any]] = {}
+HTTP_JSON_CACHE_TTL_SECONDS = 60 * 60
+
+async def cached_http_get_json(url: str, params: Dict[str, Any], ttl_seconds: int = HTTP_JSON_CACHE_TTL_SECONDS) -> Dict[str, Any]:
+    cache_key = f"{url}?{sorted((key, str(value)) for key, value in params.items())}"
+    now = datetime.now(timezone.utc)
+    cached = HTTP_JSON_CACHE.get(cache_key)
+    if cached and (now - cached['created_at']).total_seconds() < ttl_seconds:
+        return cached['data']
+
+    last_status = 0
+    async with httpx.AsyncClient(timeout=10) as cli:
+        for attempt in range(3):
+            r = await cli.get(url, params=params)
+            last_status = r.status_code
+            if r.status_code == 200:
+                data = r.json()
+                HTTP_JSON_CACHE[cache_key] = {'created_at': now, 'data': data}
+                return data
+            if r.status_code not in (429, 500, 502, 503, 504):
+                break
+            if attempt < 2:
+                await asyncio.sleep(0.25 * (2 ** attempt))
+    raise HTTPException(502, f'External service error ({last_status})')
 
 def decode_image_payload(raw: str) -> bytes:
     if ',' in raw and raw.startswith('data:'):
@@ -1473,6 +1608,17 @@ def delete_community_post_image(url: str) -> None:
     except Exception:
         logging.warning('Could not delete community image %s', path)
 
+def owned_community_upload(url: str, user_id: str) -> bool:
+    path = resolve_local_upload_path(url)
+    if not path:
+        return False
+    user_dir = (UPLOAD_DIR / 'community' / user_id).resolve()
+    try:
+        path.resolve().relative_to(user_dir)
+        return True
+    except ValueError:
+        return False
+
 @api_router.post('/uploads/wardrobe-image', response_model=UploadImageResponse)
 async def upload_wardrobe_image(payload: UploadImageRequest, user: dict = Depends(get_current_user)):
     try:
@@ -1496,12 +1642,46 @@ async def upload_wardrobe_image(payload: UploadImageRequest, user: dict = Depend
     except Exception as e:
         raise HTTPException(400, f'Could not process image: {e}')
 
+@api_router.post('/uploads/community-post-image', response_model=UploadImageResponse)
+async def upload_community_post_image(payload: UploadImageRequest, user: dict = Depends(get_current_user)):
+    try:
+        data = decode_image_payload(payload.image)
+        img = Image.open(io.BytesIO(data)).convert('RGBA')
+        img.thumbnail((1440, 1800))
+        flattened = Image.new('RGB', img.size, '#F7F4EC')
+        flattened.paste(img, mask=img.getchannel('A'))
+        user_dir = UPLOAD_DIR / 'community' / user['id']
+        user_dir.mkdir(parents=True, exist_ok=True)
+        target = user_dir / f'{uuid.uuid4().hex}.jpg'
+        flattened.save(target, format='JPEG', quality=86, optimize=True)
+        return UploadImageResponse(
+            url=public_upload_url(target),
+            width=flattened.width,
+            height=flattened.height,
+            content_type='image/jpeg',
+        )
+    except HTTPException:
+        raise
+    except Image.DecompressionBombError:
+        raise HTTPException(413, 'Image is too large to process safely')
+    except Exception as e:
+        raise HTTPException(400, f'Could not process image: {e}')
+
 Image.MAX_IMAGE_PIXELS = 24_000_000  # About 24 megapixels max for Pillow decompression-bomb guard
 
 @api_router.post("/palette")
 async def extract_palette(payload: PaletteRequest, user: dict = Depends(get_current_user)):
     try:
         data = decode_image_payload(payload.image)
+        if ColorThief is not None:
+            palette = ColorThief(io.BytesIO(data)).get_palette(color_count=5, quality=1)
+            hexes = [
+                f'#{r:02X}{g:02X}{b:02X}'
+                for r, g, b in palette
+                if not (r > 240 and g > 240 and b > 240) and not (r < 15 and g < 15 and b < 15)
+            ][:3]
+            if hexes:
+                return {'colors': hexes, 'method': 'colorthief'}
         img = Image.open(io.BytesIO(data))
         # Light decode without loading huge images at full resolution
         img.draft('RGB', (256, 256))
@@ -1522,7 +1702,7 @@ async def extract_palette(payload: PaletteRequest, user: dict = Depends(get_curr
                 break
         if not hexes:
             hexes = ['#888888']
-        return {'colors': hexes}
+        return {'colors': hexes, 'method': 'pillow-fallback'}
     except HTTPException:
         raise
     except Image.DecompressionBombError:
@@ -1586,6 +1766,10 @@ def edge_connected_background_mask(img: Image.Image, bg: tuple) -> Image.Image:
 async def remove_background(payload: PaletteRequest, user: dict = Depends(get_current_user)):
     try:
         data = decode_image_payload(payload.image)
+        if rembg_remove is not None:
+            output_data = rembg_remove(data)
+            encoded = base64.b64encode(output_data).decode('utf-8')
+            return {'image': f'data:image/png;base64,{encoded}', 'method': 'ai-rembg'}
         img = Image.open(io.BytesIO(data)).convert('RGBA')
         img.thumbnail((768, 768))
         bg = estimate_background_rgb(img)
@@ -1596,7 +1780,7 @@ async def remove_background(payload: PaletteRequest, user: dict = Depends(get_cu
         out = io.BytesIO()
         img.save(out, format='PNG')
         encoded = base64.b64encode(out.getvalue()).decode('utf-8')
-        return {'image': f'data:image/png;base64,{encoded}', 'method': 'edge-connected'}
+        return {'image': f'data:image/png;base64,{encoded}', 'method': 'edge-connected-fallback'}
     except HTTPException:
         raise
     except Image.DecompressionBombError:
@@ -1826,7 +2010,17 @@ async def create_community_post(payload: CommunityPostCreate, user: dict = Depen
     title = clean_social_text(payload.title, field='Title', max_length=80)
     if not title:
         title = f"{trip['destination']} packing grid"
-    image = render_community_post_image(user, trip, grid, by_id, title)
+    if payload.image_url:
+        if not owned_community_upload(payload.image_url, user['id']):
+            raise HTTPException(400, 'image_url must be an uploaded community post image')
+        image = {
+            'url': payload.image_url,
+            'width': max(0, int(payload.image_width or 0)),
+            'height': max(0, int(payload.image_height or 0)),
+            'dominant_colors': normalize_colors(payload.dominant_colors) or item_dominant_colors(list(by_id.values())),
+        }
+    else:
+        image = render_community_post_image(user, trip, grid, by_id, title)
     post = CommunityPost(
         author_id=user['id'],
         author_name=display_name(user),
@@ -2318,6 +2512,17 @@ async def seed_templates():
                 },
                 upsert=True,
             )
+
+        user_indexes = [
+            ([('id', 1)], True, 'uniq_user_id'),
+            ([('email', 1)], True, 'uniq_user_email'),
+            ([('firebase_uid', 1)], True, 'uniq_firebase_uid'),
+        ]
+        for keys, unique, name in user_indexes:
+            try:
+                await db.users.create_index(keys, unique=unique, name=name, sparse=name == 'uniq_firebase_uid')
+            except Exception as ie:
+                logger.info(f'{name} index ensure: {ie}')
 
         # Unique compound index for per-user like idempotency (DB-level guard).
         try:

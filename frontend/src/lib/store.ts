@@ -62,6 +62,7 @@ type State = {
   removeTrip: (id: string) => void;
   upsertWardrobeItem: (i: WardrobeItem) => void;
   removeWardrobeItem: (id: string) => void;
+  toggleChecklistOptimistic: (tripId: string, itemKey: string) => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -275,6 +276,30 @@ export const useStore = create<State>((set, get) => ({
     const next = get().trips.filter((x) => x.id !== id);
     writeJson(TRIPS_CACHE_KEY, next);
     set({ trips: next });
+  },
+
+  toggleChecklistOptimistic: (tripId, itemKey) => {
+    const target = get().trips.find((trip) => trip.id === tripId);
+    if (!target) return;
+    const checked = !Boolean(target.checklist_state[itemKey]);
+    const trips = get().trips.map((trip) =>
+      trip.id === tripId
+        ? {
+            ...trip,
+            checklist_state: {
+              ...trip.checklist_state,
+              [itemKey]: checked,
+            },
+          }
+        : trip
+    );
+    writeJson(TRIPS_CACHE_KEY, trips);
+    set({ trips });
+
+    api
+      .put(`/trips/${tripId}/checklist`, { item_key: itemKey, checked })
+      .then((r) => get().upsertTrip(r.data))
+      .catch(() => {});
   },
 
   upsertWardrobeItem: (i) => {

@@ -122,29 +122,18 @@ export default function Lookbook() {
     );
   };
 
-  const assignOutfitDay = (outfit: Outfit) => {
-    if (!trip) return;
-    Alert.alert(
-      'Plan outfit',
-      'Choose the day for this outfit.',
-      [
-        ...tripDates.map((day) => ({
-          text: day,
-          onPress: async () => {
-            try {
-              const r = await api.put(`/trips/${trip.id}/outfit-plan`, {
-                date: day,
-                outfit_key: outfit.key,
-              });
-              upsertTrip(r.data);
-            } catch (e: unknown) {
-              Alert.alert('Plan failed', getApiErrorMessage(e, 'Could not plan outfit'));
-            }
-          },
-        })),
-        { text: 'Cancel', style: 'cancel' as const },
-      ]
-    );
+  const assignOutfitDay = async (outfit: Outfit) => {
+    const day = suggestionDate || tripDates[0];
+    if (!trip || !day) return;
+    try {
+      const r = await api.put(`/trips/${trip.id}/outfit-plan`, {
+        date: day,
+        outfit_key: outfit.key,
+      });
+      upsertTrip(r.data);
+    } catch (e: unknown) {
+      Alert.alert('Plan failed', getApiErrorMessage(e, 'Could not plan outfit'));
+    }
   };
 
   const savePostTripReflection = async () => {
@@ -271,36 +260,42 @@ export default function Lookbook() {
             </Pressable>
           </View>
 
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: 24, gap: 8, paddingTop: 12 }}
-            style={{ flexGrow: 0 }}
-          >
-            {tripDates.map((day) => {
-              const key = trip.outfit_plan?.[day];
-              const planned = tagged.find((outfit) => outfit.key === key);
-              const active = suggestionDate === day;
-              return (
-                <Pressable
-                  key={day}
-                  onPress={() => setSuggestionDate(day)}
-                  style={[
-                    styles.dayChip,
-                    {
-                      borderColor: active || key ? c.accent : c.borderSubtle,
-                      backgroundColor: active ? c.accent + '18' : 'transparent',
-                    },
-                  ]}
-                >
-                  <Text style={{ color: active || key ? c.accent : c.textSecondary, fontSize: 10, fontWeight: '800' }}>{day.slice(5)}</Text>
-                  <Text style={{ color: c.textTertiary, fontSize: 10, marginTop: 2 }}>
-                    {planned ? `Outfit ${planned.index + 1}` : 'Unplanned'}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+          <View style={styles.ribbonContainer}>
+            <Text style={[styles.ribbonLabel, { color: c.textTertiary }]}>ASSIGN OUTFIT TO DAY</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 24, gap: 8 }}
+              style={{ flexGrow: 0 }}
+            >
+              {tripDates.map((day, index) => {
+                const key = trip.outfit_plan?.[day];
+                const planned = tagged.find((outfit) => outfit.key === key);
+                const active = suggestionDate === day;
+                return (
+                  <Pressable
+                    key={day}
+                    onPress={() => setSuggestionDate(day)}
+                    style={[
+                      styles.dayChip,
+                      {
+                        borderColor: active || key ? c.accent : c.borderSubtle,
+                        backgroundColor: active ? c.accent : key ? c.surface : 'transparent',
+                      },
+                    ]}
+                  >
+                    <Text style={{ color: active ? c.bg : key ? c.accent : c.textPrimary, fontSize: 14, fontWeight: '800' }}>
+                      Day {index + 1}
+                    </Text>
+                    <Text style={{ color: active ? c.bg : c.textTertiary, fontSize: 10, marginTop: 2 }}>
+                      {day.slice(5)}
+                    </Text>
+                    {planned && !active ? <View style={[styles.indicatorDot, { backgroundColor: c.accent }]} /> : null}
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
 
           <ScrollView contentContainerStyle={{ padding: 24, gap: 16 }} showsVerticalScrollIndicator={false}>
             {suggestions.length > 0 && (
@@ -381,6 +376,7 @@ export default function Lookbook() {
                 onSetOccasion={() => setOccasion(outfit)}
                 onPlan={() => assignOutfitDay(outfit)}
                 plannedDates={tripDates.filter((day) => trip.outfit_plan?.[day] === outfit.key)}
+                selectedDateLabel={suggestionDate ? `PLAN DAY ${tripDates.indexOf(suggestionDate) + 1}` : 'PLAN DAY'}
               />
             ))}
           </ScrollView>
@@ -415,6 +411,7 @@ function OutfitCard({
   onSetOccasion,
   onPlan,
   plannedDates,
+  selectedDateLabel,
 }: {
   outfit: Outfit;
   itemsById: Record<string, WardrobeItem>;
@@ -424,6 +421,7 @@ function OutfitCard({
   onSetOccasion: () => void;
   onPlan: () => void;
   plannedDates: string[];
+  selectedDateLabel: string;
 }) {
   const { c } = useTheme();
   const top = outfit.topId ? itemsById[outfit.topId] : null;
@@ -483,7 +481,7 @@ function OutfitCard({
         </Pressable>
         <Pressable onPress={onPlan} style={[styles.tag, { borderColor: plannedDates.length ? c.accent : c.borderActive }]}>
           <Text style={{ color: plannedDates.length ? c.accent : c.textPrimary, fontSize: 11, letterSpacing: 1, fontWeight: '600' }}>
-            {plannedDates.length ? plannedDates.map((day) => day.slice(5)).join(', ') : 'PLAN DAY'}
+            {plannedDates.length ? plannedDates.map((day) => day.slice(5)).join(', ') : selectedDateLabel}
           </Text>
         </Pressable>
         <Text style={{ color: c.textTertiary, fontSize: 11 }}>
@@ -502,7 +500,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     borderWidth: 1, borderRadius: 4, paddingVertical: 12,
   },
-  dayChip: { minWidth: 92, borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  ribbonContainer: { paddingTop: 14 },
+  ribbonLabel: { fontSize: 9, letterSpacing: 1.5, fontWeight: '800', marginBottom: 8, paddingHorizontal: 24 },
+  dayChip: {
+    minWidth: 72,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+    position: 'relative',
+  },
+  indicatorDot: { position: 'absolute', bottom: 4, width: 4, height: 4, borderRadius: 2 },
   smartPanel: { borderWidth: 1, borderRadius: 8, padding: 14 },
   smartHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   smartRow: { flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderRadius: 8, padding: 10 },

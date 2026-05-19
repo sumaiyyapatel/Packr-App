@@ -46,9 +46,11 @@ export default function GridScreen() {
   const [saving, setSaving] = useState(false);
   const [pickerSlot, setPickerSlot] = useState<number | null>(null);
   const [completeMoment, setCompleteMoment] = useState(false);
+  const [activeDragCategory, setActiveDragCategory] = useState<WardrobeItem['category'] | null>(null);
 
-  // Slot rects in absolute screen coordinates (set via onLayout + measure)
+  // Slot rects stay relative to the grid wrapper; the wrapper is measured at drop time.
   const slotRects = useRef<Record<number, SlotRect>>({});
+  const gridRef = useRef<View | null>(null);
   const wasComplete = useRef(false);
 
   useEffect(() => {
@@ -117,13 +119,13 @@ export default function GridScreen() {
   };
 
   // Drop handler: called from worklet via runOnJS
-  const handleDrop = (itemId: string, absX: number, absY: number) => {
+  const resolveDrop = (itemId: string, localX: number, localY: number) => {
     const rects = slotRects.current;
     let target: number | null = null;
     for (let s = 0; s < 9; s++) {
       const r = rects[s];
       if (!r) continue;
-      if (absX >= r.x && absX <= r.x + r.w && absY >= r.y && absY <= r.y + r.h) {
+      if (localX >= r.x && localX <= r.x + r.w && localY >= r.y && localY <= r.y + r.h) {
         target = s;
         break;
       }
@@ -149,6 +151,13 @@ export default function GridScreen() {
     next[target] = itemId;
     setGrid(next);
     saveGrid(next);
+  };
+
+  const handleDrop = (itemId: string, absX: number, absY: number) => {
+    if (!gridRef.current?.measure) return;
+    gridRef.current.measure((_x, _y, _w, _h, pageX, pageY) => {
+      resolveDrop(itemId, absX - pageX, absY - pageY);
+    });
   };
 
   const onGenerate = () => {
@@ -195,7 +204,7 @@ export default function GridScreen() {
         </Text>
 
         {/* 3x3 Grid */}
-        <View style={[styles.grid, { borderColor: c.borderSubtle }]}>
+        <View ref={gridRef} style={[styles.grid, { borderColor: c.borderSubtle }]}>
           {[0, 1, 2].map((row) => (
             <View key={row} style={styles.gridRow}>
               {[0, 1, 2].map((col) => {
@@ -205,38 +214,38 @@ export default function GridScreen() {
                 const conflict = conflicts.slotConflicts[i];
                 const expected = categoryForSlot(i);
                 const slotMeta = CATEGORY_META[item?.category || expected];
+                const isGuidingDrag = Boolean(activeDragCategory);
+                const isValidDragTarget = activeDragCategory === expected;
                 return (
                   <Pressable
                     testID={`grid-slot-${i}`}
                     key={i}
                     onPress={() => onSlotTap(i)}
                     onLayout={(e) => {
-                      const target = e.target as any;
-                      if (target?.measure) {
-                        target.measure(
-                          (_x: number, _y: number, w: number, h: number, px: number, py: number) => {
-                            slotRects.current[i] = { x: px, y: py, w, h };
-                          }
-                        );
-                      } else {
-                        const { x, y, width, height } = e.nativeEvent.layout;
-                        slotRects.current[i] = { x, y, w: width, h: height };
-                      }
+                      const { x, y, width, height } = e.nativeEvent.layout;
+                      slotRects.current[i] = { x, y, w: width, h: height };
                     }}
                     style={[
                       styles.slot,
                       {
                         borderColor: conflict
                           ? c.warning
+                          : isValidDragTarget
+                          ? c.accent
                           : item
                           ? slotMeta.color
                           : slotMeta.color + '88',
+                        borderWidth: isValidDragTarget ? 2 : 1,
                         backgroundColor: conflict
                           ? c.warning + '22'
+                          : isValidDragTarget
+                          ? c.accent + '18'
                           : item
                           ? slotMeta.soft
                           : c.surface,
                         borderStyle: item ? 'solid' : 'dashed',
+                        opacity: isGuidingDrag && !isValidDragTarget ? 0.3 : 1,
+                        transform: [{ scale: isValidDragTarget ? 1.02 : 1 }],
                       },
                     ]}
                   >
@@ -322,6 +331,8 @@ export default function GridScreen() {
               item={it}
               inGrid={grid.includes(it.id)}
               onDrop={(absX, absY) => handleDrop(it.id, absX, absY)}
+              onDragStart={() => setActiveDragCategory(it.category)}
+              onDragEnd={() => setActiveDragCategory(null)}
             />
           ))}
         </ScrollView>
@@ -435,10 +446,14 @@ function DraggableItem({
   item,
   inGrid,
   onDrop,
+  onDragStart,
+  onDragEnd,
 }: {
   item: WardrobeItem;
   inGrid: boolean;
   onDrop: (absX: number, absY: number) => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
 }) {
   const { c } = useTheme();
   const tx = useSharedValue(0);
@@ -454,6 +469,7 @@ function DraggableItem({
     .onStart(() => {
       dragging.value = 1;
       runOnJS(setIsDragging)(true);
+      runOnJS(onDragStart)();
       runOnJS(triggerHaptic)();
     })
     .onUpdate((e) => {
@@ -472,6 +488,7 @@ function DraggableItem({
       ty.value = withSpring(0);
       dragging.value = 0;
       runOnJS(setIsDragging)(false);
+      runOnJS(onDragEnd)();
     });
 
   const animStyle = useAnimatedStyle(() => ({
