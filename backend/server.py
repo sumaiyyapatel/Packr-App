@@ -88,7 +88,12 @@ def resolve_backend_path(raw_path: str) -> str:
 APP_ENV = os.environ.get('PACKR_ENV') or os.environ.get('APP_ENV') or os.environ.get('ENVIRONMENT') or 'development'
 IS_PRODUCTION = APP_ENV.lower() in ('prod', 'production')
 FEATURE_PRO_ENABLED = env_bool('FEATURE_PRO_ENABLED', False)
+<<<<<<< HEAD
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', ROOT_DIR / 'uploads'))
+=======
+DEFAULT_UPLOAD_DIR = Path('/tmp/packr-uploads') if os.environ.get('VERCEL') else ROOT_DIR / 'uploads'
+UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', DEFAULT_UPLOAD_DIR))
+>>>>>>> 38e44c4 (Resolve merge conflicts)
 PUBLIC_UPLOAD_BASE_URL = os.environ.get('PUBLIC_UPLOAD_BASE_URL', '').rstrip('/')
 
 MONGO_URL = first_env('MONGODB_URI', 'MONGO_URL', 'MONGO_URI')
