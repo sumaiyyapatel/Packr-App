@@ -26,7 +26,7 @@ from pymongo.errors import DuplicateKeyError
 
 try:
     from rembg import remove as rembg_remove
-except Exception:
+except BaseException:
     rembg_remove = None
 
 try:
