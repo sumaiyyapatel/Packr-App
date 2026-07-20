@@ -1,0 +1,93 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // ---------- Per-user data: owner-only ----------
+    match /users/{uid} {
+      allow read, write: if isOwner(uid);
+      // Never allow a user to grant themselves Pro from the client.
+      allow update: if isOwner(uid)
+        && request.resource.data.is_pro == resource.data.is_pro;
+
+      match /wardrobe/{itemId} {
+        allow read, write: if isOwner(uid);
+      }
+
+      match /trips/{tripId} {
+        allow read, write: if isOwner(uid);
+
+        match /reflections/{reflectionId} {
+          allow read, write: if isOwner(uid);
+        }
+      }
+    }
+
+    // ---------- Templates: public read, guarded writes ----------
+    match /templates/{templateId} {
+      allow read: if true;
+      // Community templates only; official ones are seeded via Admin SDK.
+      allow create: if signedIn()
+        && request.resource.data.is_official == false
+        && request.resource.data.author_id == request.auth.uid
+        && request.resource.data.items.size() == 9;
+      allow update, delete: if signedIn()
+        && resource.data.author_id == request.auth.uid
+        && resource.data.is_official == false;
+    }
+
+    // ---------- Community (Phase 3) ----------
+    match /posts/{postId} {
+      allow read: if signedIn()
+        && (resource.data.visibility == 'public'
+            || resource.data.author_id == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.author_id == request.auth.uid;
+      allow update, delete: if signedIn()
+        && resource.data.author_id == request.auth.uid;
+
+      match /likes/{uid} {
+        allow read: if signedIn();
+        allow create, delete: if isOwner(uid);
+      }
+      match /saves/{uid} {
+        allow read: if isOwner(uid);
+        allow create, delete: if isOwner(uid);
+      }
+      match /comments/{commentId} {
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && request.resource.data.user_id == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 500;
+        allow delete: if signedIn()
+          && (resource.data.user_id == request.auth.uid
+              || get(/databases/$(database)/documents/posts/$(postId)).data.author_id == request.auth.uid);
+      }
+    }
+
+    match /follows/{edgeId} {
+      // edgeId convention: `${followerId}_${followingId}`
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && edgeId == request.auth.uid + '_' + request.resource.data.following_id
+        && request.resource.data.follower_id == request.auth.uid;
+      allow delete: if signedIn()
+        && resource.data.follower_id == request.auth.uid;
+    }
+
+    // Default deny everything else.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

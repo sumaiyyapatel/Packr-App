@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -7,6 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import io
+import shutil
 import base64
 import json
 import re
@@ -130,6 +131,40 @@ if IS_PRODUCTION and any(not origin.startswith('https://') for origin in CORS_OR
 app = FastAPI(title="Packr API")
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
+
+# ========== RATE LIMITING (in-memory, per-process) ==========
+# Enabled by default in production; override with RATE_LIMIT_ENABLED=1/0.
+# Good enough for a single Render instance. If you ever scale to multiple
+# instances, move the buckets to Redis.
+RATE_LIMIT_ENABLED = env_bool('RATE_LIMIT_ENABLED', IS_PRODUCTION)
+_RATE_BUCKETS: Dict[str, deque] = {}
+_RATE_BUCKETS_MAX = 10_000
+
+def _client_key(request: Request) -> str:
+    forwarded = request.headers.get('x-forwarded-for', '')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.client.host if request.client else 'unknown'
+
+def rate_limited(scope: str, limit: int, window_seconds: int = 60):
+    """FastAPI dependency: sliding-window limit per client IP per scope."""
+    async def dependency(request: Request) -> None:
+        if not RATE_LIMIT_ENABLED:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        cutoff = now - window_seconds
+        key = f'{scope}:{_client_key(request)}'
+        bucket = _RATE_BUCKETS.setdefault(key, deque())
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= limit:
+            raise HTTPException(429, 'Too many requests. Please wait a moment and try again.')
+        bucket.append(now)
+        if len(_RATE_BUCKETS) > _RATE_BUCKETS_MAX:
+            stale = [k for k, v in _RATE_BUCKETS.items() if not v or v[-1] < cutoff]
+            for k in stale:
+                _RATE_BUCKETS.pop(k, None)
+    return dependency
 
 def init_firebase_auth() -> None:
     global FIREBASE_AUTH_READY
@@ -519,6 +554,16 @@ LAYER_SLOTS = [2, 4, 6]
 
 def category_for_slot(slot: int) -> str:
     return CATEGORY_BY_SLOT[slot]
+
+# Client-supplied keys that end up inside Mongo update paths ($set on
+# checklist_state.<key> / occasion_tags.<key>) must never contain '.' or '$',
+# which would create nested fields or malformed operators.
+SAFE_STATE_KEY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9:_\-|]{0,127}$')
+
+def validate_state_key(value: str, field: str) -> str:
+    if not SAFE_STATE_KEY_RE.match(value or ''):
+        raise HTTPException(400, f'{field} contains unsupported characters')
+    return value
 
 def validate_trip_dates(start_date: str, end_date: str) -> None:
     try:
@@ -958,7 +1003,7 @@ async def social_profile_for(uid: str, viewer_id: str) -> SocialProfile:
     )
 
 # ========== AUTH ROUTES ==========
-@api_router.post("/auth/register", response_model=TokenResponse)
+@api_router.post("/auth/register", response_model=TokenResponse, dependencies=[Depends(rate_limited('auth', 10))])
 async def register(payload: UserRegister):
     if not ALLOW_LEGACY_AUTH:
         raise HTTPException(status.HTTP_410_GONE, 'Password auth is disabled; use Firebase Auth')
@@ -977,7 +1022,7 @@ async def register(payload: UserRegister):
     await db.users.insert_one(user_doc.copy())
     return TokenResponse(token=create_token(user_doc['id']), user=user_public(user_doc))
 
-@api_router.post("/auth/login", response_model=TokenResponse)
+@api_router.post("/auth/login", response_model=TokenResponse, dependencies=[Depends(rate_limited('auth', 10))])
 async def login(payload: UserLogin):
     if not ALLOW_LEGACY_AUTH:
         raise HTTPException(status.HTTP_410_GONE, 'Password auth is disabled; use Firebase Auth')
@@ -1147,6 +1192,7 @@ async def update_occasion(trip_id: str, payload: OccasionUpdate, user: dict = De
     if not trip:
         raise HTTPException(404, 'Trip not found')
     key = outfit_identity_key(payload, for_tag=True)
+    validate_state_key(str(key), 'outfit_key')
     valid_keys = valid_outfit_keys(trip.get('grid') or [])
     if isinstance(key, str) and '|' in key and valid_keys and key not in valid_keys:
         raise HTTPException(400, 'outfit_key does not match this grid')
@@ -1287,6 +1333,7 @@ async def create_trip_invite(
 
 @api_router.put("/trips/{trip_id}/checklist", response_model=Trip)
 async def update_checklist(trip_id: str, payload: ChecklistUpdate, user: dict = Depends(get_current_user)):
+    validate_state_key(payload.item_key, 'item_key')
     await db.trips.update_one(
         {'id': trip_id, 'user_id': user['id']},
         {'$set': {f'checklist_state.{payload.item_key}': payload.checked}}
@@ -1320,7 +1367,7 @@ async def remove_extra(trip_id: str, extra_id: str, user: dict = Depends(get_cur
     return Trip(**trip)
 
 # ========== WEATHER (Open-Meteo) ==========
-@api_router.get("/weather")
+@api_router.get("/weather", dependencies=[Depends(rate_limited('geo', 60))])
 async def weather(latitude: float, longitude: float, start_date: Optional[str] = None, end_date: Optional[str] = None):
     """Geocoding -> forecast via Open-Meteo. No API key required."""
     params = {
@@ -1346,7 +1393,7 @@ async def weather(latitude: float, longitude: float, start_date: Optional[str] =
             return await cached_http_get_json('https://api.open-meteo.com/v1/forecast', fallback)
         raise HTTPException(502, 'Weather service error')
 
-@api_router.get("/geocode")
+@api_router.get("/geocode", dependencies=[Depends(rate_limited('geo', 60))])
 async def geocode(q: str):
     """City search via Open-Meteo geocoding."""
     data = await cached_http_get_json(
@@ -1619,7 +1666,7 @@ def owned_community_upload(url: str, user_id: str) -> bool:
     except ValueError:
         return False
 
-@api_router.post('/uploads/wardrobe-image', response_model=UploadImageResponse)
+@api_router.post('/uploads/wardrobe-image', response_model=UploadImageResponse, dependencies=[Depends(rate_limited('upload', 30))])
 async def upload_wardrobe_image(payload: UploadImageRequest, user: dict = Depends(get_current_user)):
     try:
         data = decode_image_payload(payload.image)
@@ -1642,7 +1689,7 @@ async def upload_wardrobe_image(payload: UploadImageRequest, user: dict = Depend
     except Exception as e:
         raise HTTPException(400, f'Could not process image: {e}')
 
-@api_router.post('/uploads/community-post-image', response_model=UploadImageResponse)
+@api_router.post('/uploads/community-post-image', response_model=UploadImageResponse, dependencies=[Depends(rate_limited('upload', 30))])
 async def upload_community_post_image(payload: UploadImageRequest, user: dict = Depends(get_current_user)):
     try:
         data = decode_image_payload(payload.image)
@@ -1669,7 +1716,7 @@ async def upload_community_post_image(payload: UploadImageRequest, user: dict = 
 
 Image.MAX_IMAGE_PIXELS = 24_000_000  # About 24 megapixels max for Pillow decompression-bomb guard
 
-@api_router.post("/palette")
+@api_router.post("/palette", dependencies=[Depends(rate_limited('image', 30))])
 async def extract_palette(payload: PaletteRequest, user: dict = Depends(get_current_user)):
     try:
         data = decode_image_payload(payload.image)
@@ -1762,7 +1809,7 @@ def edge_connected_background_mask(img: Image.Image, bg: tuple) -> Image.Image:
                 enqueue(nx, ny)
     return mask
 
-@api_router.post("/cutout")
+@api_router.post("/cutout", dependencies=[Depends(rate_limited('cutout', 10))])
 async def remove_background(payload: PaletteRequest, user: dict = Depends(get_current_user)):
     try:
         data = decode_image_payload(payload.image)
@@ -2266,8 +2313,14 @@ async def retention_nudges(user: dict = Depends(get_current_user)):
         ))
     return nudges[:5]
 
-@api_router.post("/analytics/events")
+@api_router.post("/analytics/events", dependencies=[Depends(rate_limited('analytics', 120))])
 async def record_analytics_event(payload: AnalyticsEventCreate, user: dict = Depends(get_current_user)):
+    try:
+        encoded_size = len(json.dumps(payload.properties, default=str))
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'properties must be JSON-serializable')
+    if encoded_size > 2048:
+        raise HTTPException(413, 'properties too large (max 2 KB)')
     await db.analytics_events.insert_one({
         'id': str(uuid.uuid4()),
         'user_id': user['id'],
@@ -2277,7 +2330,7 @@ async def record_analytics_event(payload: AnalyticsEventCreate, user: dict = Dep
     })
     return {'ok': True}
 
-@api_router.post("/feedback")
+@api_router.post("/feedback", dependencies=[Depends(rate_limited('feedback', 10))])
 async def submit_feedback(payload: FeedbackCreate, user: dict = Depends(get_current_user)):
     await db.feedback.insert_one({
         'id': str(uuid.uuid4()),
@@ -2356,10 +2409,83 @@ class AirlineProfile(BaseModel):
     name: str
     max_kg: float
 
+@api_router.delete("/me")
+async def delete_account(user: dict = Depends(get_current_user)):
+    """Permanently delete the account and all associated data.
+
+    Required by Google Play / App Store policies for apps with account
+    creation. Removes: profile, wardrobe, trips, reflections, invites,
+    community posts (+ likes/saves/comments on them), the user's own
+    social activity, analytics, feedback, uploaded images, and the
+    Firebase Auth user.
+    """
+    uid = user['id']
+
+    # Community posts authored by the user, and everything attached to them.
+    posts = await db.community_posts.find(
+        {'author_id': uid}, {'_id': 0, 'id': 1, 'image_url': 1}
+    ).to_list(2000)
+    post_ids = [post['id'] for post in posts]
+    for post in posts:
+        delete_community_post_image(post.get('image_url', ''))
+    if post_ids:
+        await db.comments.delete_many({'post_id': {'$in': post_ids}})
+        await db.post_likes.delete_many({'post_id': {'$in': post_ids}})
+        await db.post_saves.delete_many({'post_id': {'$in': post_ids}})
+        await db.challenge_votes.delete_many({'post_id': {'$in': post_ids}})
+        await db.community_posts.delete_many({'author_id': uid})
+
+    # The user's own activity on other people's content.
+    await db.comments.delete_many({'user_id': uid})
+    await db.post_likes.delete_many({'user_id': uid})
+    await db.post_saves.delete_many({'user_id': uid})
+    await db.challenge_votes.delete_many({'user_id': uid})
+    await db.follows.delete_many({'$or': [{'follower_id': uid}, {'following_id': uid}]})
+    await db.template_likes.delete_many({'user_id': uid})
+    await db.community_reports.delete_many({'reporter_id': uid})
+    await db.comment_reports.delete_many({'reporter_id': uid})
+
+    # Core user data.
+    await db.templates.delete_many({'author_id': uid, 'is_official': {'$ne': True}})
+    await db.trip_reflections.delete_many({'user_id': uid})
+    await db.trip_invites.delete_many({'owner_id': uid})
+    await db.trips.delete_many({'user_id': uid})
+    await db.wardrobe.delete_many({'user_id': uid})
+    await db.analytics_events.delete_many({'user_id': uid})
+    await db.feedback.delete_many({'user_id': uid})
+    await db.users.delete_one({'id': uid})
+
+    # Uploaded files on disk.
+    for subdir in ('wardrobe', 'community'):
+        target = (UPLOAD_DIR / subdir / uid).resolve()
+        try:
+            target.relative_to(UPLOAD_DIR.resolve())
+            shutil.rmtree(target, ignore_errors=True)
+        except ValueError:
+            pass
+
+    # Firebase Auth account (best-effort; token is already consumed).
+    if FIREBASE_AUTH_READY and firebase_auth is not None and user.get('firebase_uid'):
+        try:
+            firebase_auth.delete_user(user['firebase_uid'])
+        except Exception as e:
+            logging.getLogger(__name__).warning(f'Firebase user delete failed for {uid}: {e}')
+
+    return {'ok': True}
+
+# Dev-only escape hatch for testing Pro flows. NEVER enable in production:
+# real upgrades must go through verified in-app purchases (e.g. RevenueCat).
+ALLOW_DEV_PRO_TOGGLE = env_bool('ALLOW_DEV_PRO_TOGGLE', not IS_PRODUCTION)
+
 @api_router.post("/me/pro", response_model=UserPublic)
 async def upgrade_to_pro(user: dict = Depends(get_current_user)):
     if not FEATURE_PRO_ENABLED:
         raise HTTPException(404, 'Packr Pro is not enabled for this release')
+    if IS_PRODUCTION or not ALLOW_DEV_PRO_TOGGLE:
+        raise HTTPException(
+            402,
+            'Pro upgrades require a verified in-app purchase. Self-serve upgrade is disabled.'
+        )
     await db.users.update_one({'id': user['id']}, {'$set': {'is_pro': True}})
     user = await db.users.find_one({'id': user['id']}, {'_id': 0})
     return user_public(user)
@@ -2523,6 +2649,14 @@ async def seed_templates():
                 await db.users.create_index(keys, unique=unique, name=name, sparse=name == 'uniq_firebase_uid')
             except Exception as ie:
                 logger.info(f'{name} index ensure: {ie}')
+
+        # Analytics events auto-expire after 90 days (TTL index).
+        try:
+            await db.analytics_events.create_index(
+                [('created_at', 1)], expireAfterSeconds=90 * 24 * 3600, name='ttl_analytics_created'
+            )
+        except Exception as ie:
+            logger.info(f'ttl_analytics_created index ensure: {ie}')
 
         # Unique compound index for per-user like idempotency (DB-level guard).
         try:

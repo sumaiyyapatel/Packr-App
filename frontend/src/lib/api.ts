@@ -1,7 +1,8 @@
-import { create } from 'axios';
+import axios from 'axios';
 import type { AxiosInstance } from 'axios';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
+import { getToken, setToken, clearToken } from './tokenStorage';
+import { getFreshFirebaseToken } from './firebaseAuth';
 
 const getBackendUrl = () => {
   const configuredUrl = process.env.EXPO_PUBLIC_BACKEND_URL || '';
@@ -29,20 +30,56 @@ const getBackendUrl = () => {
 const BASE = getBackendUrl();
 export const API_BASE_URL = `${BASE}/api`;
 
-export const TOKEN_KEY = 'packr.token';
-
-export const api: AxiosInstance = create({
+export const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   timeout: 20000,
 });
 
 api.interceptors.request.use(async (config) => {
-  const token = await AsyncStorage.getItem(TOKEN_KEY);
+  // Prefer a live Firebase token: the SDK caches it and silently refreshes
+  // near expiry, so long sessions never send a stale token. Fall back to the
+  // stored token (legacy JWT or cold-start before Firebase rehydrates).
+  let token: string | null = null;
+  try {
+    token = await getFreshFirebaseToken();
+  } catch {
+    token = null;
+  }
+  if (token) {
+    setToken(token).catch(() => {});
+  } else {
+    token = await getToken();
+  }
   if (token) {
     config.headers = config.headers || {};
     (config.headers as any).Authorization = `Bearer ${token}`;
   }
   return config;
+});
+
+// On 401, force-refresh the Firebase token once and retry the request.
+// Prevents mid-session logouts when a cached token just expired.
+let refreshInFlight: Promise<string | null> | null = null;
+
+api.interceptors.response.use(undefined, async (error) => {
+  const original = error?.config as (typeof error.config & { _retried?: boolean }) | undefined;
+  if (error?.response?.status === 401 && original && !original._retried) {
+    original._retried = true;
+    if (!refreshInFlight) {
+      refreshInFlight = getFreshFirebaseToken(true).finally(() => {
+        refreshInFlight = null;
+      });
+    }
+    const fresh = await refreshInFlight;
+    if (fresh) {
+      await setToken(fresh);
+      original.headers = { ...(original.headers || {}), Authorization: `Bearer ${fresh}` };
+      return api.request(original);
+    }
+    // No refresh possible: clear the stale token so the app can re-auth.
+    await clearToken().catch(() => {});
+  }
+  return Promise.reject(error);
 });
 
 function formatErrorLocation(loc: unknown) {

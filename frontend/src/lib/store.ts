@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { api, TOKEN_KEY, User, Trip, WardrobeItem } from './api';
+import { api, User, Trip, WardrobeItem } from './api';
+import { getToken, setToken, clearToken } from './tokenStorage';
 import {
   getCurrentFirebaseToken,
   isFirebaseAuthConfigured,
@@ -76,11 +77,11 @@ export const useStore = create<State>((set, get) => ({
   selectedAirlineId: null,
 
   hydrate: async () => {
-    let token = await AsyncStorage.getItem(TOKEN_KEY);
+    let token = await getToken();
     const firebaseToken = await getCurrentFirebaseToken();
     if (firebaseToken) {
       token = firebaseToken;
-      await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+      await setToken(firebaseToken);
     }
     const onboarded = (await AsyncStorage.getItem(ONBOARDED_KEY)) === '1';
     const selectedTripId = await AsyncStorage.getItem(SELECTED_TRIP_KEY);
@@ -111,7 +112,8 @@ export const useStore = create<State>((set, get) => ({
         return;
       } catch (e: any) {
         if (e?.response?.status === 401 || e?.response?.status === 403) {
-          await AsyncStorage.multiRemove([TOKEN_KEY, USER_CACHE_KEY]);
+          await clearToken();
+          await AsyncStorage.removeItem(USER_CACHE_KEY);
         } else if (cachedUser) {
           return;
         }
@@ -129,7 +131,7 @@ export const useStore = create<State>((set, get) => ({
         // If Firebase auth fails in development, fall back to backend
       }
       if (firebaseToken) {
-        await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+        await setToken(firebaseToken);
         const r = await api.get('/auth/me');
         writeJson(USER_CACHE_KEY, r.data);
         set({ token: firebaseToken, user: r.data });
@@ -138,7 +140,7 @@ export const useStore = create<State>((set, get) => ({
       }
     }
     const r = await api.post('/auth/register', { email, password, name });
-    await AsyncStorage.setItem(TOKEN_KEY, r.data.token);
+    await setToken(r.data.token);
     writeJson(USER_CACHE_KEY, r.data.user);
     set({ token: r.data.token, user: r.data.user });
     await get().refreshAll();
@@ -153,7 +155,7 @@ export const useStore = create<State>((set, get) => ({
         // Firebase login failed; fall back to backend auth
       }
       if (firebaseToken) {
-        await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+        await setToken(firebaseToken);
         const r = await api.get('/auth/me');
         writeJson(USER_CACHE_KEY, r.data);
         set({ token: firebaseToken, user: r.data });
@@ -162,7 +164,7 @@ export const useStore = create<State>((set, get) => ({
       }
     }
     const r = await api.post('/auth/login', { email, password });
-    await AsyncStorage.setItem(TOKEN_KEY, r.data.token);
+    await setToken(r.data.token);
     writeJson(USER_CACHE_KEY, r.data.user);
     set({ token: r.data.token, user: r.data.user });
     await get().refreshAll();
@@ -172,7 +174,7 @@ export const useStore = create<State>((set, get) => ({
     try {
       const firebaseToken = await loginWithGoogleIdToken(googleIdToken);
       if (!firebaseToken) throw new Error('Firebase Google sign-in is not configured');
-      await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+      await setToken(firebaseToken);
       const r = await api.get('/auth/me');
       writeJson(USER_CACHE_KEY, r.data);
       set({ token: firebaseToken, user: r.data });
@@ -187,7 +189,7 @@ export const useStore = create<State>((set, get) => ({
   loginWithGoogleWeb: async () => {
     const firebaseToken = await loginWithGooglePopup();
     if (!firebaseToken) throw new Error('Firebase Google sign-in is not configured');
-    await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+    await setToken(firebaseToken);
     const r = await api.get('/auth/me');
     writeJson(USER_CACHE_KEY, r.data);
     set({ token: firebaseToken, user: r.data });
@@ -197,7 +199,7 @@ export const useStore = create<State>((set, get) => ({
   loginWithGoogleNative: async () => {
     const firebaseToken = await loginWithNativeGoogle();
     if (!firebaseToken) throw new Error('Native Google sign-in is not configured for this platform');
-    await AsyncStorage.setItem(TOKEN_KEY, firebaseToken);
+    await setToken(firebaseToken);
     const r = await api.get('/auth/me');
     writeJson(USER_CACHE_KEY, r.data);
     set({ token: firebaseToken, user: r.data });
@@ -206,8 +208,8 @@ export const useStore = create<State>((set, get) => ({
 
   logout: async () => {
     await logoutFirebase().catch(() => {});
+    await clearToken();
     await AsyncStorage.multiRemove([
-      TOKEN_KEY,
       USER_CACHE_KEY,
       TRIPS_CACHE_KEY,
       WARDROBE_CACHE_KEY,

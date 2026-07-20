@@ -141,6 +141,22 @@ export async function loginWithNativeGoogle() {
   );
 }
 
+/**
+ * Cheap token getter for request interceptors: returns a valid ID token for
+ * the signed-in user (the SDK caches it and auto-refreshes near expiry).
+ * Returns null immediately when nobody is signed in — no listener wait.
+ */
+export async function getFreshFirebaseToken(forceRefresh = false): Promise<string | null> {
+  const auth = getFirebaseAuth();
+  const user = auth?.currentUser;
+  if (!user) return null;
+  try {
+    return await user.getIdToken(forceRefresh);
+  } catch {
+    return null;
+  }
+}
+
 export async function getCurrentFirebaseToken() {
   const auth = getFirebaseAuth();
   if (!auth) return null;
