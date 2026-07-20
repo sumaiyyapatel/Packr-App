@@ -23,7 +23,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, getApiErrorMessage, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
+import { getApiErrorMessage, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
 import {
   categoryForSlot,
   checkConflicts,
@@ -39,7 +39,7 @@ export default function GridScreen() {
   const trips = useStore((s) => s.trips);
   const wardrobe = useStore((s) => s.wardrobe);
   const selectedTripId = useStore((s) => s.selectedTripId);
-  const upsertTrip = useStore((s) => s.upsertTrip);
+  const saveGridRemote = useStore((s) => s.saveGrid);
 
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0];
   const [grid, setGrid] = useState<(string | null)[]>(trip?.grid || Array(9).fill(null));
@@ -84,8 +84,7 @@ export default function GridScreen() {
     if (!trip) return;
     setSaving(true);
     try {
-      const r = await api.put(`/trips/${trip.id}/grid`, { grid: g });
-      upsertTrip(r.data);
+      await saveGridRemote(trip.id, g);
     } catch (e: unknown) {
       Alert.alert('Save failed', getApiErrorMessage(e, 'Could not save grid'));
     } finally {

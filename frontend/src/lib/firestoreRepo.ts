@@ -18,8 +18,11 @@ import {
   doc,
   getDoc,
   getDocs,
+  increment,
+  limit,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -27,7 +30,7 @@ import {
   Timestamp,
 } from 'firebase/firestore';
 import { getDb } from './firebase';
-import type { Trip, User, WardrobeItem } from './api';
+import type { Template, Trip, User, WardrobeItem } from './api';
 
 // ---------- shared helpers ----------
 
@@ -165,7 +168,14 @@ export async function updateWardrobeItem(
 }
 
 export async function deleteWardrobeItem(uid: string, itemId: string): Promise<void> {
-  await deleteDoc(doc(getDb(), 'users', uid, 'wardrobe', itemId));
+  const itemRef = doc(getDb(), 'users', uid, 'wardrobe', itemId);
+  const snapshot = await getDoc(itemRef);
+  const imageUrl = snapshot.exists() ? String(snapshot.data().image ?? '') : '';
+  await deleteDoc(itemRef);
+  if (imageUrl) {
+    // Best-effort Storage cleanup; never blocks the delete.
+    import('./storage').then(({ deleteImageByUrl }) => deleteImageByUrl(imageUrl)).catch(() => {});
+  }
   // Remove the item from any trip grids (mirrors server.py delete cleanup).
   const trips = await listTrips(uid);
   const batch = writeBatch(getDb());
@@ -364,6 +374,176 @@ export async function removeExtra(
 ): Promise<void> {
   await updateDoc(doc(getDb(), 'users', uid, 'trips', tripId), {
     extras: currentExtras.filter((e) => e.id !== extraId),
+  });
+}
+
+// ---------- reflections ----------
+
+export async function createReflection(
+  uid: string,
+  trip: Trip,
+  input: { worn_outfit_keys: string[]; unused_item_ids: string[]; notes?: string; rating?: number | null }
+): Promise<void> {
+  const gridIds = new Set((trip.grid ?? []).filter(Boolean));
+  const validKeys = validOutfitKeys(trip.grid ?? []);
+  if (validKeys.size && input.worn_outfit_keys.some((key) => !validKeys.has(key))) {
+    throw new Error('worn_outfit_keys must match this trip grid');
+  }
+  if (input.unused_item_ids.some((id) => !gridIds.has(id))) {
+    throw new Error('unused_item_ids must come from this trip grid');
+  }
+  await setDoc(doc(getDb(), 'users', uid, 'trips', trip.id, 'reflections', newId()), {
+    worn_outfit_keys: input.worn_outfit_keys,
+    unused_item_ids: input.unused_item_ids,
+    notes: (input.notes ?? '').slice(0, 1000),
+    rating: input.rating ?? null,
+    created_at: serverTimestamp(),
+  });
+}
+
+export async function listReflectedTripIds(uid: string, trips: Trip[]): Promise<Set<string>> {
+  const today = new Date().toISOString().slice(0, 10);
+  const past = trips.filter((trip) => trip.end_date < today);
+  const reflected = new Set<string>();
+  await Promise.all(
+    past.map(async (trip) => {
+      const snapshot = await getDocs(collection(getDb(), 'users', uid, 'trips', trip.id, 'reflections'));
+      if (!snapshot.empty) reflected.add(trip.id);
+    })
+  );
+  return reflected;
+}
+
+// ---------- templates (apply backend/community template into Firestore) ----------
+
+export async function applyTemplate(
+  uid: string,
+  trip: Trip,
+  templateItems: Array<{ name?: string; category?: string; image?: string; colors?: string[]; tags?: string[] }>
+): Promise<void> {
+  if (templateItems.length !== 9) throw new Error('Template must include exactly 9 items');
+  templateItems.forEach((item, slot) => {
+    if (item.category !== CATEGORY_BY_SLOT[slot]) {
+      throw new Error('Template item order is invalid');
+    }
+  });
+
+  const db = getDb();
+  const batch = writeBatch(db);
+
+  // Clean up from-template clones referenced by this trip's previous grid
+  // and unused by other trips (mirrors server.py apply cleanup).
+  const priorIds = (trip.grid ?? []).filter((x): x is string => Boolean(x));
+  if (priorIds.length) {
+    const [wardrobe, trips] = await Promise.all([listWardrobe(uid), listTrips(uid)]);
+    const byId = new Map(wardrobe.map((w) => [w.id, w]));
+    for (const itemId of priorIds) {
+      const item = byId.get(itemId);
+      if (!item || !(item.tags ?? []).includes('from-template')) continue;
+      const stillUsed = trips.some((t) => t.id !== trip.id && (t.grid ?? []).includes(itemId));
+      if (!stillUsed) batch.delete(doc(db, 'users', uid, 'wardrobe', itemId));
+    }
+  }
+
+  const newGrid: (string | null)[] = Array(9).fill(null);
+  templateItems.forEach((raw, slot) => {
+    const id = newId();
+    batch.set(doc(db, 'users', uid, 'wardrobe', id), {
+      name: raw.name ?? `Item ${slot + 1}`,
+      category: CATEGORY_BY_SLOT[slot],
+      image: raw.image ?? '',
+      colors: raw.colors ?? [],
+      weight_kg: 0.3,
+      tags: [...new Set([...(raw.tags ?? []), 'from-template'])],
+      created_at: serverTimestamp(),
+    });
+    newGrid[slot] = id;
+  });
+
+  batch.update(doc(db, 'users', uid, 'trips', trip.id), {
+    grid: newGrid,
+    ...cleanOutfitStateForGrid(trip, newGrid),
+    checklist_state: cleanChecklistStateForGrid(trip, newGrid),
+  });
+  await batch.commit();
+}
+
+// ---------- templates collection ----------
+
+function toTemplate(id: string, data: Record<string, unknown>): Template {
+  return { ...(data as unknown as Template), id, created_at: toIso(data.created_at) };
+}
+
+export type TemplateFilters = {
+  q?: string;
+  climate?: string;
+  daysMin?: number;
+  daysMax?: number;
+  source?: 'official' | 'community' | 'all';
+};
+
+export async function listTemplates(filters: TemplateFilters = {}): Promise<Template[]> {
+  const snapshot = await getDocs(
+    query(collection(getDb(), 'templates'), orderBy('likes', 'desc'), limit(200))
+  );
+  let templates = snapshot.docs.map((d) => toTemplate(d.id, d.data()));
+  const q = filters.q?.trim().toLowerCase();
+  if (q) {
+    templates = templates.filter((t) =>
+      [t.title, t.description, t.destination, t.season].some((v) => (v ?? '').toLowerCase().includes(q))
+    );
+  }
+  if (filters.climate) templates = templates.filter((t) => t.climate === filters.climate);
+  if (filters.daysMin != null) templates = templates.filter((t) => t.days >= (filters.daysMin as number));
+  if (filters.daysMax != null) templates = templates.filter((t) => t.days <= (filters.daysMax as number));
+  if (filters.source === 'official') templates = templates.filter((t) => t.is_official);
+  if (filters.source === 'community') templates = templates.filter((t) => !t.is_official);
+  // Official first, then by likes (query already sorted by likes).
+  return templates.sort((a, b) => Number(b.is_official) - Number(a.is_official));
+}
+
+export async function getTemplate(id: string): Promise<Template> {
+  const snapshot = await getDoc(doc(getDb(), 'templates', id));
+  if (!snapshot.exists()) throw new Error('Template not found');
+  return toTemplate(snapshot.id, snapshot.data());
+}
+
+export async function publishTemplate(
+  uid: string,
+  data: Omit<Template, 'id' | 'author_id' | 'author_name' | 'is_official' | 'likes' | 'created_at'>
+): Promise<Template> {
+  if (data.items.length !== 9) throw new Error('Template must include exactly 9 items');
+  const id = newId();
+  const docData = {
+    ...data,
+    author_id: uid,
+    author_name: 'anonymous',
+    is_official: false,
+    likes: 0,
+    created_at: serverTimestamp(),
+  };
+  await setDoc(doc(getDb(), 'templates', id), docData);
+  return { ...docData, id, created_at: new Date().toISOString() } as Template;
+}
+
+export async function isTemplateLiked(uid: string, templateId: string): Promise<boolean> {
+  const snapshot = await getDoc(doc(getDb(), 'templates', templateId, 'likes', uid));
+  return snapshot.exists();
+}
+
+export async function setTemplateLike(uid: string, templateId: string, liked: boolean): Promise<void> {
+  const db = getDb();
+  const likeRef = doc(db, 'templates', templateId, 'likes', uid);
+  const templateRef = doc(db, 'templates', templateId);
+  await runTransaction(db, async (tx) => {
+    const existing = await tx.get(likeRef);
+    if (liked && !existing.exists()) {
+      tx.set(likeRef, { user_id: uid, created_at: serverTimestamp() });
+      tx.update(templateRef, { likes: increment(1) });
+    } else if (!liked && existing.exists()) {
+      tx.delete(likeRef);
+      tx.update(templateRef, { likes: increment(-1) });
+    }
   });
 }
 

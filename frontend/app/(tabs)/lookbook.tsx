@@ -14,6 +14,8 @@ import * as Haptics from 'expo-haptics';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
 import { api, getApiErrorMessage, OutfitSuggestion, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
+import { scoreOutfitSuggestions } from '../../src/lib/tripLogic';
+import { publishTemplate } from '../../src/lib/firestoreRepo';
 import { generate27Outfits, isGridComplete, suggestOccasion, Outfit } from '../../src/lib/sudoku';
 import { CATEGORY_META } from '../../src/lib/wardrobeMeta';
 
@@ -24,7 +26,10 @@ export default function Lookbook() {
   const trips = useStore((s) => s.trips);
   const wardrobe = useStore((s) => s.wardrobe);
   const selectedTripId = useStore((s) => s.selectedTripId);
-  const upsertTrip = useStore((s) => s.upsertTrip);
+  const toggleFavoriteRemote = useStore((s) => s.toggleFavorite);
+  const tagOccasionRemote = useStore((s) => s.tagOccasion);
+  const planOutfitRemote = useStore((s) => s.planOutfit);
+  const saveReflectionRemote = useStore((s) => s.saveReflection);
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0];
   const [filter, setFilter] = useState<string>('All');
   const [suggestions, setSuggestions] = useState<OutfitSuggestion[]>([]);
@@ -73,31 +78,25 @@ export default function Lookbook() {
       setSuggestions([]);
       return;
     }
-    (async () => {
-      try {
-        const r = await api.get(`/trips/${trip.id}/outfit-suggestions`, {
-          params: {
-            date: suggestionDate,
-            occasion: filter !== 'All' && filter !== 'Favorites' ? filter : undefined,
-          },
-        });
-        setSuggestions(r.data);
-      } catch {
-        setSuggestions([]);
-      }
-    })();
-  }, [trip, suggestionDate, filter]);
+    try {
+      setSuggestions(
+        scoreOutfitSuggestions(
+          trip,
+          itemsById,
+          suggestionDate,
+          filter !== 'All' && filter !== 'Favorites' ? filter : undefined
+        )
+      );
+    } catch {
+      setSuggestions([]);
+    }
+  }, [trip, suggestionDate, filter, itemsById]);
 
   const toggleFav = async (outfit: Outfit & { isFav: boolean }) => {
     if (!trip) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     try {
-      const r = await api.put(`/trips/${trip.id}/favorite`, {
-        outfit_index: outfit.index,
-        outfit_key: outfit.key,
-        is_favorite: !outfit.isFav,
-      });
-      upsertTrip(r.data);
+      await toggleFavoriteRemote(trip.id, outfit.key, !outfit.isFav);
     } catch {}
   };
 
@@ -110,12 +109,7 @@ export default function Lookbook() {
         text: occasion,
         onPress: async () => {
           try {
-            const r = await api.put(`/trips/${trip.id}/occasion`, {
-              outfit_index: outfit.index,
-              outfit_key: outfit.key,
-              occasion,
-            });
-            upsertTrip(r.data);
+            await tagOccasionRemote(trip.id, outfit.key, occasion);
           } catch {}
         },
       }))
@@ -126,11 +120,7 @@ export default function Lookbook() {
     const day = suggestionDate || tripDates[0];
     if (!trip || !day) return;
     try {
-      const r = await api.put(`/trips/${trip.id}/outfit-plan`, {
-        date: day,
-        outfit_key: outfit.key,
-      });
-      upsertTrip(r.data);
+      await planOutfitRemote(trip.id, day, outfit.key);
     } catch (e: unknown) {
       Alert.alert('Plan failed', getApiErrorMessage(e, 'Could not plan outfit'));
     }
@@ -145,12 +135,7 @@ export default function Lookbook() {
     const unused = trip.grid.filter((id): id is string => Boolean(id && !used.has(id)));
     setReflecting(true);
     try {
-      await api.post(`/trips/${trip.id}/reflections`, {
-        worn_outfit_keys: worn,
-        unused_item_ids: unused,
-        notes: 'Saved from post-trip reflection',
-        rating: null,
-      });
+      await saveReflectionRemote(trip.id, worn, unused);
       Alert.alert('Reflection saved', 'Unused items and worn outfits were recorded.');
     } catch (e: unknown) {
       Alert.alert('Reflection failed', getApiErrorMessage(e, 'Could not save reflection'));
@@ -186,7 +171,9 @@ export default function Lookbook() {
       }));
 
     try {
-      await api.post('/templates', {
+      const uid = useStore.getState().user?.id;
+      if (!uid) throw new Error('Not signed in');
+      await publishTemplate(uid, {
         title: `${trip.destination} Packing Grid`,
         description: `Community grid for ${trip.destination}.`,
         destination: trip.destination,

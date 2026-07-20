@@ -13,7 +13,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
-import { api, getApiErrorMessage, Template } from '../../src/lib/api';
+import { getApiErrorMessage, Template } from '../../src/lib/api';
+import { getTemplate, isTemplateLiked, setTemplateLike } from '../../src/lib/firestoreRepo';
 import { useStore } from '../../src/lib/store';
 
 export default function TemplateDetail() {
@@ -31,8 +32,9 @@ export default function TemplateDetail() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await api.get(`/templates/${id}`);
-        setTpl(r.data);
+        setTpl(await getTemplate(String(id)));
+        const uid = useStore.getState().user?.id;
+        if (uid) setLiked(await isTemplateLiked(uid, String(id)));
       } catch {}
       setLoading(false);
     })();
@@ -47,8 +49,8 @@ export default function TemplateDetail() {
     const doApply = async () => {
       setApplying(true);
       try {
-        await api.post(`/templates/${id}/apply`, { trip_id: trip.id });
-        await refreshAll();
+        if (!tpl) throw new Error('Template still loading');
+        await useStore.getState().applyTemplateToTrip(trip.id, tpl.items);
         if (Platform.OS !== 'web') Alert.alert('Applied', 'Template loaded into your grid.');
         router.replace('/(tabs)/grid');
       } catch (e: unknown) {
@@ -76,8 +78,10 @@ export default function TemplateDetail() {
     if (liked || !tpl) return;
     setLiked(true);
     try {
-      const r = await api.post(`/templates/${id}/like`);
-      setTpl(r.data);
+      const uid = useStore.getState().user?.id;
+      if (!uid) throw new Error('Not signed in');
+      await setTemplateLike(uid, tpl.id, true);
+      setTpl({ ...tpl, likes: tpl.likes + 1 });
     } catch {
       setLiked(false);
     }

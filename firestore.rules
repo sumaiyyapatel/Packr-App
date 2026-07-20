@@ -42,6 +42,14 @@ service cloud.firestore {
       allow update, delete: if signedIn()
         && resource.data.author_id == request.auth.uid
         && resource.data.is_official == false;
+      // Any signed-in user may adjust ONLY the likes counter.
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']);
+
+      match /likes/{uid} {
+        allow read: if signedIn();
+        allow create, delete: if isOwner(uid);
+      }
     }
 
     // ---------- Community (Phase 3) ----------

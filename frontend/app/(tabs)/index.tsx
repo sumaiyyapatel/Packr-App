@@ -16,6 +16,10 @@ import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
 import { api, Template, Trip, TripInvite, TripNudge, TripStats, WardrobeItem } from '../../src/lib/api';
 import { gridProgress, isGridComplete } from '../../src/lib/sudoku';
+import { buildNudges, computeTripStats } from '../../src/lib/tripLogic';
+import { fetchDailyForecast } from '../../src/lib/weather';
+import { listTemplates } from '../../src/lib/firestoreRepo';
+import { listReflectedTripIds } from '../../src/lib/firestoreRepo';
 import { checkClimateFit } from '../../src/lib/climate';
 
 const WEATHER_ICON: Record<number, string> = {
@@ -44,8 +48,8 @@ export default function Dashboard() {
   const refreshAll = useStore((s) => s.refreshAll);
   const selectedTripId = useStore((s) => s.selectedTripId);
   const setSelectedTrip = useStore((s) => s.setSelectedTrip);
-  const upsertTrip = useStore((s) => s.upsertTrip);
-  const removeTrip = useStore((s) => s.removeTrip);
+  const deleteTripRemote = useStore((s) => s.deleteTripRemote);
+  const applyTemplateToTrip = useStore((s) => s.applyTemplateToTrip);
   const logout = useStore((s) => s.logout);
   const user = useStore((s) => s.user);
 
@@ -69,21 +73,19 @@ export default function Dashboard() {
   useEffect(() => {
     (async () => {
       const next: Record<string, any> = {};
-      for (const t of trips) {
-        if (t.latitude && t.longitude && !weather[t.id]) {
-          try {
-            const r = await api.get('/weather', {
-              params: {
-                latitude: t.latitude,
-                longitude: t.longitude,
-                start_date: t.start_date,
-                end_date: t.end_date,
-              },
-            });
-            next[t.id] = r.data?.daily;
-          } catch {}
-        }
-      }
+      await Promise.all(
+        trips
+          .filter((t) => t.latitude && t.longitude && !weather[t.id])
+          .map(async (t) => {
+            const daily = await fetchDailyForecast(
+              t.latitude as number,
+              t.longitude as number,
+              t.start_date,
+              t.end_date
+            );
+            if (daily) next[t.id] = daily;
+          })
+      );
       if (Object.keys(next).length) setWeather((prev) => ({ ...prev, ...next }));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -95,23 +97,26 @@ export default function Dashboard() {
     if (!selected?.id) {
       setStats(null);
       setInvites([]);
+      setNudges([]);
       return;
     }
+    // Stats and nudges are computed locally from Firestore-backed state.
+    const byId: Record<string, WardrobeItem> = {};
+    for (const w of wardrobe) byId[w.id] = w;
+    setStats(computeTripStats(selected, byId));
+    setInvites([]);
+    let cancelled = false;
     (async () => {
+      let reflected = new Set<string>();
       try {
-        const [statsResponse, invitesResponse, nudgesResponse] = await Promise.all([
-          api.get(`/trips/${selected.id}/stats`),
-          api.get(`/trips/${selected.id}/invites`),
-          api.get('/retention/nudges'),
-        ]);
-        setStats(statsResponse.data);
-        setInvites(invitesResponse.data);
-        setNudges(nudgesResponse.data);
-      } catch {
-        setStats(null);
-      }
+        if (user?.id) reflected = await listReflectedTripIds(user.id, trips);
+      } catch {}
+      if (!cancelled) setNudges(buildNudges(trips, wardrobe, reflected));
     })();
-  }, [selected?.id]);
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, trips, wardrobe, user?.id]);
 
   const itemsById = useMemo(() => {
     const m: Record<string, WardrobeItem> = {};
@@ -136,8 +141,7 @@ export default function Dashboard() {
         style: 'destructive',
         onPress: async () => {
           try {
-            await api.delete(`/trips/${t.id}`);
-            removeTrip(t.id);
+            await deleteTripRemote(t.id);
             if (selectedTripId === t.id) setSelectedTrip(null);
           } catch {}
         },
@@ -149,10 +153,9 @@ export default function Dashboard() {
     if (!selected) return;
     setInviteBusy(true);
     try {
-      const r = await api.post(`/trips/${selected.id}/invites`, {});
-      setInvites((current) => [r.data, ...current]);
-    } catch {
-      Alert.alert('Invite failed', 'Could not create an invite code.');
+      // Trip invites are paused during the Firebase migration (the accept
+      // flow was never built server-side — see IMPROVEMENTS.md §5).
+      Alert.alert('Coming soon', 'Trip invites are being rebuilt on the new backend.');
     } finally {
       setInviteBusy(false);
     }
@@ -167,15 +170,13 @@ export default function Dashboard() {
     if (!selected) return;
     setDemoLoading(true);
     try {
-      const r = await api.get<Template[]>('/templates', {
-        params: { q: 'Lisbon', source: 'official' },
-      });
+      const officials = await listTemplates({ q: 'Lisbon', source: 'official' });
       const template =
-        r.data.find((item) => item.title.toLowerCase().includes('lisbon')) || r.data[0];
+        officials.find((item) => item.title.toLowerCase().includes('lisbon')) ||
+        officials[0] ||
+        (await listTemplates({ source: 'official' }))[0];
       if (!template) throw new Error('No official templates available');
-      const applied = await api.post(`/templates/${template.id}/apply`, { trip_id: selected.id });
-      upsertTrip(applied.data);
-      await refreshAll();
+      await applyTemplateToTrip(selected.id, template.items);
       router.push('/(tabs)/grid');
     } catch {
       Alert.alert('Sample capsule unavailable', 'Try again after templates finish loading.');

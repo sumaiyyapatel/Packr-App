@@ -13,7 +13,8 @@ import {
 import { useRouter } from 'expo-router';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, getApiErrorMessage } from '../../src/lib/api';
+import { getApiErrorMessage } from '../../src/lib/api';
+import { fetchDailyForecast, geocodeCity } from '../../src/lib/weather';
 import { trackEvent } from '../../src/lib/analytics';
 
 type GeoResult = {
@@ -27,8 +28,6 @@ type GeoResult = {
 export default function TripCreate() {
   const { c } = useTheme();
   const router = useRouter();
-  const upsertTrip = useStore((s) => s.upsertTrip);
-  const setSelectedTrip = useStore((s) => s.setSelectedTrip);
   const trips = useStore((s) => s.trips);
 
   const [destination, setDestination] = useState('');
@@ -49,8 +48,7 @@ export default function TripCreate() {
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
-        const r = await api.get('/geocode', { params: { q: destination.trim() } });
-        setResults(r.data.results || []);
+        setResults(await geocodeCity(destination));
       } catch {
         setResults([]);
       } finally {
@@ -68,15 +66,7 @@ export default function TripCreate() {
     let alive = true;
     (async () => {
       try {
-        const r = await api.get('/weather', {
-          params: {
-            latitude: picked.latitude,
-            longitude: picked.longitude,
-            start_date: startDate,
-            end_date: endDate,
-          },
-        });
-        const daily = r.data?.daily;
+        const daily = await fetchDailyForecast(picked.latitude, picked.longitude, startDate, endDate);
         const max = daily?.temperature_2m_max?.[0];
         const min = daily?.temperature_2m_min?.[0];
         const rain = daily?.precipitation_sum?.[0];
@@ -141,9 +131,7 @@ export default function TripCreate() {
         payload.latitude = picked.latitude;
         payload.longitude = picked.longitude;
       }
-      const r = await api.post('/trips', payload);
-      upsertTrip(r.data);
-      setSelectedTrip(r.data.id);
+      await useStore.getState().createNewTrip(payload);
       trackEvent('trip_created', { has_weather_location: Boolean(picked) });
       router.replace('/(tabs)');
     } catch (e: unknown) {

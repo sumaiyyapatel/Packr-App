@@ -36,8 +36,9 @@ export default function Checklist() {
   const selectedTripId = useStore((s) => s.selectedTripId);
   const selectedAirlineId = useStore((s) => s.selectedAirlineId);
   const setSelectedAirline = useStore((s) => s.setSelectedAirline);
-  const upsertTrip = useStore((s) => s.upsertTrip);
   const toggleChecklistOptimistic = useStore((s) => s.toggleChecklistOptimistic);
+  const addTripExtra = useStore((s) => s.addTripExtra);
+  const removeTripExtra = useStore((s) => s.removeTripExtra);
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0];
   const [showAdd, setShowAdd] = useState(false);
 
@@ -69,8 +70,7 @@ export default function Checklist() {
   const onRemoveExtra = async (id: string) => {
     if (!trip) return;
     try {
-      const r = await api.delete(`/trips/${trip.id}/extras/${id}`);
-      upsertTrip(r.data);
+      await removeTripExtra(trip.id, id);
     } catch {}
   };
 
@@ -291,11 +291,8 @@ export default function Checklist() {
       <AddExtraModal
         visible={showAdd}
         onClose={() => setShowAdd(false)}
-        onCreated={(t) => {
-          upsertTrip(t);
-          setShowAdd(false);
-        }}
-        tripId={trip.id}
+        onCreated={() => setShowAdd(false)}
+        onSubmit={(extra) => addTripExtra(trip.id, extra)}
       />
     </SafeAreaView>
   );
@@ -361,12 +358,12 @@ function AddExtraModal({
   visible,
   onClose,
   onCreated,
-  tripId,
+  onSubmit,
 }: {
   visible: boolean;
   onClose: () => void;
-  onCreated: (t: Trip) => void;
-  tripId: string;
+  onCreated: () => void;
+  onSubmit: (extra: { name: string; category: string; weight_kg: number }) => Promise<void>;
 }) {
   const { c } = useTheme();
   const [name, setName] = useState('');
@@ -377,12 +374,12 @@ function AddExtraModal({
   const onSave = async () => {
     setSaving(true);
     try {
-      const r = await api.post(`/trips/${tripId}/extras`, {
+      await onSubmit({
         name: name.trim(),
         weight_kg: parseFloat(weight) || 0.1,
         category: cat,
       });
-      onCreated(r.data);
+      onCreated();
       setName('');
       setWeight('0.1');
       setCat('other');

@@ -20,6 +20,8 @@ import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
 import { api, getApiErrorMessage, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
 import { trackEvent } from '../../src/lib/analytics';
+import { uploadWardrobeImage } from '../../src/lib/storage';
+import { downscaleToDataUri, ensureFirestoreSafeImage } from '../../src/lib/images';
 import {
   CATEGORY_META,
   CATEGORY_ORDER,
@@ -35,7 +37,6 @@ export default function Studio() {
   const { c } = useTheme();
   const wardrobe = useStore((s) => s.wardrobe);
   const upsertWardrobeItem = useStore((s) => s.upsertWardrobeItem);
-  const removeWardrobeItem = useStore((s) => s.removeWardrobeItem);
   const refreshTrips = useStore((s) => s.refreshTrips);
 
   const [filter, setFilter] = useState<Filter>('all');
@@ -70,8 +71,7 @@ export default function Studio() {
         style: 'destructive',
         onPress: async () => {
           try {
-            await api.delete(`/wardrobe/${item.id}`);
-            removeWardrobeItem(item.id);
+            await useStore.getState().deleteWardrobe(item.id);
           } catch {}
         },
       },
@@ -267,10 +267,19 @@ function ItemEditorModal({
   const pickPhoto = async (fromCamera: boolean) => {
     setErr(null);
     const options: ImagePicker.ImagePickerOptions = {
-      quality: 0.8,
+      quality: 0.9,
       allowsEditing: true,
       aspect: [1, 1],
-      base64: true,
+    };
+
+    const applyAsset = async (asset: ImagePicker.ImagePickerAsset) => {
+      try {
+        // Downscale immediately: small enough to embed in Firestore,
+        // and makes cutout/palette calls much faster too.
+        setImageBase64(await downscaleToDataUri(asset.uri));
+      } catch {
+        setErr('Could not process that photo. Try another one.');
+      }
     };
 
     if (fromCamera) {
@@ -280,11 +289,7 @@ function ItemEditorModal({
         return;
       }
       const r = await ImagePicker.launchCameraAsync(options);
-      if (!r.canceled && r.assets[0]) {
-        const asset = r.assets[0];
-        const mime = asset.mimeType || 'image/jpeg';
-        setImageBase64(`data:${mime};base64,${asset.base64}`);
-      }
+      if (!r.canceled && r.assets[0]) await applyAsset(r.assets[0]);
       return;
     }
 
@@ -294,11 +299,7 @@ function ItemEditorModal({
       return;
     }
     const r = await ImagePicker.launchImageLibraryAsync(options);
-    if (!r.canceled && r.assets[0]) {
-      const asset = r.assets[0];
-      const mime = asset.mimeType || 'image/jpeg';
-      setImageBase64(`data:${mime};base64,${asset.base64}`);
-    }
+    if (!r.canceled && r.assets[0]) await applyAsset(r.assets[0]);
   };
 
   const toggleTag = (tag: string) => {
@@ -322,7 +323,7 @@ function ItemEditorModal({
       if (imageForSave.startsWith('data:') && imageChanged && autoClean) {
         try {
           setCleaning(true);
-          const cr = await api.post('/cutout', { image: imageForSave });
+          const cr = await api.post('/cutout', { image: imageForSave }, { timeout: 8000 });
           if (cr.data?.image) {
             imageForSave = cr.data.image;
             setImageBase64(cr.data.image);
@@ -336,7 +337,7 @@ function ItemEditorModal({
 
       if (imageForSave && imageChanged) {
         try {
-          const pr = await api.post('/palette', { image: imageForSave });
+          const pr = await api.post('/palette', { image: imageForSave }, { timeout: 4000 });
           if (pr.data?.colors?.length) palette = pr.data.colors;
         } catch {
           palette = pickPaletteFromTags(tags);
@@ -346,8 +347,15 @@ function ItemEditorModal({
 
       let image = imageForSave;
       if (imageForSave.startsWith('data:') && imageChanged) {
-        const upload = await api.post('/uploads/wardrobe-image', { image: imageForSave });
-        image = upload.data.url;
+        const uid = useStore.getState().user?.id;
+        if (!uid) throw new Error('Not signed in');
+        try {
+          image = await uploadWardrobeImage(uid, imageForSave);
+        } catch {
+          // Spark plan (no Cloud Storage): embed the downscaled image
+          // directly in the Firestore document instead.
+          image = await ensureFirestoreSafeImage(imageForSave);
+        }
       }
 
       const payload = {
@@ -358,11 +366,11 @@ function ItemEditorModal({
         weight_kg: parseFloat(weight) || 0.3,
         tags,
       };
-      const r = editing && item
-        ? await api.put(`/wardrobe/${item.id}`, payload)
-        : await api.post('/wardrobe', payload);
+      const saved = await useStore
+        .getState()
+        .saveWardrobe(payload, editing && item ? item.id : undefined);
       trackEvent(editing ? 'wardrobe_item_updated' : 'wardrobe_item_added', { category });
-      await onSaved(r.data);
+      await onSaved(saved);
     } catch (e: unknown) {
       setErr(getApiErrorMessage(e, 'Failed to save'));
     } finally {

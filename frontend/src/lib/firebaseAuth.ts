@@ -1,7 +1,7 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import type { FirebaseApp } from 'firebase/app';
 import * as FirebaseAuth from 'firebase/auth';
-import type { Auth, Persistence, UserCredential } from 'firebase/auth';
+import type { Auth, Persistence, User as FirebaseUser, UserCredential } from 'firebase/auth';
 import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { Platform } from 'react-native';
@@ -155,6 +155,33 @@ export async function getFreshFirebaseToken(forceRefresh = false): Promise<strin
   } catch {
     return null;
   }
+}
+
+/** Resolve the signed-in Firebase user, waiting briefly for rehydration. */
+export async function waitForFirebaseUser(timeoutMs = 2500): Promise<FirebaseUser | null> {
+  const auth = getFirebaseAuth();
+  if (!auth) return null;
+  if (auth.currentUser) return auth.currentUser;
+  return new Promise<FirebaseUser | null>((resolve) => {
+    let unsubscribe = () => {};
+    const timer = setTimeout(() => {
+      unsubscribe();
+      resolve(null);
+    }, timeoutMs);
+    unsubscribe = FirebaseAuth.onAuthStateChanged(
+      auth,
+      (user) => {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(user);
+      },
+      () => {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(null);
+      }
+    );
+  });
 }
 
 export async function getCurrentFirebaseToken() {

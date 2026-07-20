@@ -4,7 +4,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
-import { api, Template } from '../../src/lib/api';
+import { Template } from '../../src/lib/api';
+import { listTemplates } from '../../src/lib/firestoreRepo';
 
 const CLIMATE_ICON: Record<string, any> = {
   cold: 'snow-outline',
@@ -28,16 +29,15 @@ export default function TemplatesIndex() {
     const timer = setTimeout(() => {
     (async () => {
       try {
-        const r = await api.get('/templates', {
-          params: {
+        setTemplates(
+          await listTemplates({
             q: q.trim() || undefined,
             climate: climate || undefined,
             source,
-            days_min: daysRange.min,
-            days_max: daysRange.max,
-          },
-        });
-        setTemplates(r.data);
+            daysMin: daysRange.min,
+            daysMax: daysRange.max,
+          })
+        );
       } catch {}
       setLoading(false);
     })();
