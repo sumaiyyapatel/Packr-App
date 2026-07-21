@@ -24,6 +24,7 @@ import Animated, {
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
 import { getApiErrorMessage, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
+import { captureRef } from 'react-native-view-shot';
 import {
   categoryForSlot,
   checkConflicts,
@@ -44,6 +45,7 @@ export default function GridScreen() {
   const trip = trips.find((t) => t.id === selectedTripId) || trips[0];
   const [grid, setGrid] = useState<(string | null)[]>(trip?.grid || Array(9).fill(null));
   const [saving, setSaving] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [pickerSlot, setPickerSlot] = useState<number | null>(null);
   const [completeMoment, setCompleteMoment] = useState(false);
   const [activeDragCategory, setActiveDragCategory] = useState<WardrobeItem['category'] | null>(null);
@@ -79,6 +81,36 @@ export default function GridScreen() {
     if (!complete) wasComplete.current = false;
     return undefined;
   }, [complete]);
+
+  const shareGrid = async () => {
+    if (!gridRef.current) return;
+    setSharing(true);
+    try {
+      // Loaded lazily and validated: on an app build without the native
+      // module, the button explains instead of crashing the route.
+      const Sharing = await import('expo-sharing').catch(() => null);
+      const available =
+        Sharing && typeof Sharing.shareAsync === 'function'
+          ? await Sharing.isAvailableAsync().catch(() => false)
+          : false;
+      if (!Sharing || !available) {
+        Alert.alert(
+          'Update needed',
+          'Sharing needs the latest app build. Rebuild and reinstall the dev client (or use Expo Go).'
+        );
+        return;
+      }
+      const uri = await captureRef(gridRef, { format: 'jpg', quality: 0.92, result: 'tmpfile' });
+      await Sharing.shareAsync(uri, {
+        mimeType: 'image/jpeg',
+        dialogTitle: 'Share your Packr grid',
+      });
+    } catch {
+      Alert.alert('Share failed', 'Could not capture the grid image.');
+    } finally {
+      setSharing(false);
+    }
+  };
 
   const saveGrid = async (g: (string | null)[]) => {
     if (!trip) return;
@@ -303,6 +335,25 @@ export default function GridScreen() {
               </Text>
             </View>
           </View>
+        )}
+
+        {complete && !conflicts.hasConflicts && (
+          <Pressable
+            onPress={shareGrid}
+            disabled={sharing}
+            accessibilityRole="button"
+            accessibilityLabel="Share your packing grid"
+            style={[styles.shareBtn, { borderColor: c.accent, opacity: sharing ? 0.6 : 1 }]}
+          >
+            {sharing ? (
+              <ActivityIndicator color={c.accent} size="small" />
+            ) : (
+              <Ionicons name="share-social-outline" size={16} color={c.accent} />
+            )}
+            <Text style={{ color: c.accent, fontWeight: '800', fontSize: 13, marginLeft: 8 }}>
+              SHARE GRID (INSTAGRAM & MORE)
+            </Text>
+          </Pressable>
         )}
 
         <View style={{ height: 16 }} />
@@ -572,6 +623,10 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 12,
   },
   completeDots: { flexDirection: 'row', gap: 4 },
+  shareBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderRadius: 8, paddingVertical: 12, marginTop: 12,
+  },
   completeDot: { width: 7, height: 7, borderRadius: 4 },
   section: { fontSize: 11, letterSpacing: 2, fontWeight: '600', marginTop: 16 },
   itemEmpty: {

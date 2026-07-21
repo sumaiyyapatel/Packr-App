@@ -29,6 +29,10 @@ service cloud.firestore {
           allow read, write: if isOwner(uid);
         }
       }
+
+      match /saved_posts/{postId} {
+        allow read, write: if isOwner(uid);
+      }
     }
 
     // ---------- Templates: public read, guarded writes ----------
@@ -53,14 +57,23 @@ service cloud.firestore {
     }
 
     // ---------- Community (Phase 3) ----------
+    // All posts are public to signed-in users (visibility tiers dropped:
+    // Firestore list rules can't express follower-gated queries).
     match /posts/{postId} {
-      allow read: if signedIn()
-        && (resource.data.visibility == 'public'
-            || resource.data.author_id == request.auth.uid);
+      allow read: if signedIn();
       allow create: if signedIn()
-        && request.resource.data.author_id == request.auth.uid;
-      allow update, delete: if signedIn()
+        && request.resource.data.author_id == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 80
+        && request.resource.data.caption is string
+        && request.resource.data.caption.size() <= 220;
+      allow delete: if signedIn()
         && resource.data.author_id == request.auth.uid;
+      // Author may edit their post; anyone signed-in may adjust ONLY counters.
+      allow update: if signedIn()
+        && (resource.data.author_id == request.auth.uid
+            || request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['likes_count', 'saves_count', 'comments_count']));
 
       match /likes/{uid} {
         allow read: if signedIn();
@@ -80,6 +93,10 @@ service cloud.firestore {
         allow delete: if signedIn()
           && (resource.data.user_id == request.auth.uid
               || get(/databases/$(database)/documents/posts/$(postId)).data.author_id == request.auth.uid);
+      }
+      match /reports/{uid} {
+        allow create: if isOwner(uid)
+          && request.resource.data.reporter_id == request.auth.uid;
       }
     }
 

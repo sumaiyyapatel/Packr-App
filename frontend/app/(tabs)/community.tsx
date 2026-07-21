@@ -17,7 +17,9 @@ import * as Haptics from 'expo-haptics';
 import { captureRef } from 'react-native-view-shot';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { useStore } from '../../src/lib/store';
-import { api, CommunityChallenge, CommunityPost, CommunitySnapshotItem, getApiErrorMessage, resolveApiAssetUrl, SocialProfile, Trip } from '../../src/lib/api';
+import { CommunityChallenge, CommunityPost, CommunitySnapshotItem, getApiErrorMessage, resolveApiAssetUrl, SocialProfile, Trip } from '../../src/lib/api';
+import * as community from '../../src/lib/communityRepo';
+import { ensureFirestoreSafeImage } from '../../src/lib/images';
 import { categoryForSlot } from '../../src/lib/sudoku';
 import { CATEGORY_META } from '../../src/lib/wardrobeMeta';
 
@@ -80,22 +82,24 @@ export default function CommunityScreen() {
 
   const loadPosts = useCallback(async () => {
     try {
-      const r = scope === 'trending'
-        ? await api.get('/community/trending', { params: { destination: trip?.destination } })
-        : await api.get('/community/posts', { params: { scope } });
-      setPosts(r.data);
+      const uid = user?.id;
+      if (!uid) return;
+      setPosts(
+        scope === 'trending'
+          ? await community.listTrending(uid, trip?.destination)
+          : await community.listPosts(uid, scope)
+      );
     } catch (e: unknown) {
       Alert.alert('Feed failed', getApiErrorMessage(e, 'Could not load community posts'));
     } finally {
       setLoading(false);
     }
-  }, [scope, trip?.destination]);
+  }, [scope, trip?.destination, user?.id]);
 
   const loadProfile = useCallback(async () => {
     if (!user?.id) return;
     try {
-      const r = await api.get(`/users/${user.id}`);
-      setProfile(r.data);
+      setProfile(await community.getProfile(user.id, user.id, user.name));
     } catch {}
   }, [user?.id]);
 
@@ -109,12 +113,20 @@ export default function CommunityScreen() {
   }, [loadProfile]);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await api.get('/community/challenges');
-        setChallenges(r.data);
-      } catch {}
-    })();
+    // Monthly challenge is generated locally (was a static backend response).
+    const month = new Date().toISOString().slice(0, 7);
+    setChallenges([
+      {
+        id: month,
+        month,
+        title: 'Monthly packing challenge',
+        prompt: 'Pack 5 days with only neutrals. Share one screenshot post and vote for your favorite grids.',
+        destination: 'Any destination',
+        climate: 'mild',
+        posts_count: 0,
+        votes_count: 0,
+      },
+    ]);
   }, []);
 
   const refresh = async () => {
@@ -165,21 +177,24 @@ export default function CommunityScreen() {
         quality: 0.86,
         result: 'data-uri',
       });
-      const upload = await api.post('/uploads/community-post-image', { image });
-      const r = await api.post('/community/posts', {
-        trip_id: trip.id,
+      if (!user?.id) throw new Error('Not signed in');
+      const safeImage = await ensureFirestoreSafeImage(image);
+      const wardrobeById: Record<string, (typeof wardrobe)[number]> = {};
+      for (const item of wardrobe) wardrobeById[item.id] = item;
+      const created = await community.createPost({
+        uid: user.id,
+        authorName: user.name || user.email.split('@')[0],
+        trip,
+        wardrobeById,
         title: `${trip.destination} packing post`,
         caption,
-        visibility,
-        image_url: upload.data.url,
-        image_width: upload.data.width,
-        image_height: upload.data.height,
+        imageDataUri: safeImage,
       });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       setCaption('');
-      setPosts((current) => [r.data, ...current.filter((post) => post.id !== r.data.id)]);
+      setPosts((current) => [created, ...current.filter((post) => post.id !== created.id)]);
       loadProfile();
-      if (scope !== 'public' && visibility === 'public') setScope('public');
+      if (scope !== 'public') setScope('public');
     } catch (e: unknown) {
       Alert.alert('Share failed', getApiErrorMessage(e, 'Could not share this post'));
     } finally {
@@ -190,10 +205,13 @@ export default function CommunityScreen() {
   const toggleLike = async (post: CommunityPost) => {
     setBusyPostId(post.id);
     try {
-      const r = post.is_liked
-        ? await api.delete(`/community/posts/${post.id}/like`)
-        : await api.post(`/community/posts/${post.id}/like`);
-      replacePost(r.data);
+      if (!user?.id) throw new Error('Not signed in');
+      await community.setLike(user.id, post.id, !post.is_liked);
+      replacePost({
+        ...post,
+        is_liked: !post.is_liked,
+        likes_count: Math.max(0, post.likes_count + (post.is_liked ? -1 : 1)),
+      });
     } catch (e: unknown) {
       Alert.alert('Action failed', getApiErrorMessage(e, 'Could not update like'));
     } finally {
@@ -204,13 +222,16 @@ export default function CommunityScreen() {
   const toggleSave = async (post: CommunityPost) => {
     setBusyPostId(post.id);
     try {
-      const r = post.is_saved
-        ? await api.delete(`/community/posts/${post.id}/save`)
-        : await api.post(`/community/posts/${post.id}/save`);
+      if (!user?.id) throw new Error('Not signed in');
+      await community.setSave(user.id, post.id, !post.is_saved);
       if (scope === 'saved' && post.is_saved) {
         setPosts((current) => current.filter((item) => item.id !== post.id));
       } else {
-        replacePost(r.data);
+        replacePost({
+          ...post,
+          is_saved: !post.is_saved,
+          saves_count: Math.max(0, post.saves_count + (post.is_saved ? -1 : 1)),
+        });
       }
     } catch (e: unknown) {
       Alert.alert('Action failed', getApiErrorMessage(e, 'Could not update saved post'));
@@ -223,10 +244,18 @@ export default function CommunityScreen() {
     if (post.author_id === user?.id) return;
     setBusyPostId(post.id);
     try {
-      const r = await (post.is_following_author
-        ? api.delete(`/users/${post.author_id}/follow`)
-        : api.post(`/users/${post.author_id}/follow`));
-      applyAuthorProfile(r.data);
+      if (!user?.id) throw new Error('Not signed in');
+      const nowFollowing = !post.is_following_author;
+      await community.setFollow(user.id, post.author_id, nowFollowing);
+      applyAuthorProfile({
+        id: post.author_id,
+        name: post.author_name,
+        is_following: nowFollowing,
+        is_friend: false,
+        followers_count: 0,
+        following_count: 0,
+        posts_count: 0,
+      });
       loadProfile();
     } catch (e: unknown) {
       Alert.alert('Follow failed', getApiErrorMessage(e, 'Could not update follow'));
@@ -240,9 +269,10 @@ export default function CommunityScreen() {
     if (!text) return;
     setBusyPostId(post.id);
     try {
-      const r = await api.post(`/community/posts/${post.id}/comments`, { text });
+      if (!user?.id) throw new Error('Not signed in');
+      await community.addComment(user.id, user.name || user.email.split('@')[0], post.id, text);
       setComments((current) => ({ ...current, [post.id]: '' }));
-      replacePost(r.data);
+      replacePost(await community.getPost(user.id, post.id));
     } catch (e: unknown) {
       Alert.alert('Comment failed', getApiErrorMessage(e, 'Could not add comment'));
     } finally {
@@ -253,8 +283,9 @@ export default function CommunityScreen() {
   const deleteComment = async (post: CommunityPost, commentId: string) => {
     setBusyPostId(post.id);
     try {
-      const r = await api.delete(`/community/posts/${post.id}/comments/${commentId}`);
-      replacePost(r.data);
+      if (!user?.id) throw new Error('Not signed in');
+      await community.deleteComment(post.id, commentId);
+      replacePost(await community.getPost(user.id, post.id));
     } catch (e: unknown) {
       Alert.alert('Delete failed', getApiErrorMessage(e, 'Could not delete comment'));
     } finally {
@@ -271,7 +302,8 @@ export default function CommunityScreen() {
         onPress: async () => {
           setBusyPostId(post.id);
           try {
-            await api.delete(`/community/posts/${post.id}`);
+            if (!user?.id) throw new Error('Not signed in');
+            await community.deletePost(user.id, post.id);
             setPosts((current) => current.filter((item) => item.id !== post.id));
             loadProfile();
           } catch (e: unknown) {
@@ -293,7 +325,8 @@ export default function CommunityScreen() {
         onPress: async () => {
           setBusyPostId(post.id);
           try {
-            await api.post(`/community/posts/${post.id}/report`, { reason: 'Reported from Android app' });
+            if (!user?.id) throw new Error('Not signed in');
+            await community.reportPost(user.id, post.id, 'Reported from Android app');
             setHiddenPostIds((current) => new Set([...current, post.id]));
           } catch (e: unknown) {
             Alert.alert('Report failed', getApiErrorMessage(e, 'Could not report post'));
@@ -310,7 +343,9 @@ export default function CommunityScreen() {
     if (!challenge) return;
     setBusyPostId(post.id);
     try {
-      await api.post(`/community/challenges/${challenge.id}/posts/${post.id}/vote`);
+      if (!user?.id) throw new Error('Not signed in');
+      // Challenge votes are backed by post likes on Firestore.
+      await community.setLike(user.id, post.id, true);
       Haptics.selectionAsync().catch(() => {});
       setChallenges((current) =>
         current.map((item, index) => index === 0 ? { ...item, votes_count: item.votes_count + 1 } : item)
@@ -325,11 +360,9 @@ export default function CommunityScreen() {
   const reportComment = async (post: CommunityPost, commentId: string) => {
     setBusyPostId(post.id);
     try {
-      await api.post(`/community/posts/${post.id}/comments/${commentId}/report`, {
-        reason: 'Reported from Android app',
-      });
-      const r = await api.get(`/community/posts/${post.id}`);
-      replacePost(r.data);
+      if (!user?.id) throw new Error('Not signed in');
+      await community.reportPost(user.id, post.id, `Comment ${commentId} reported from Android app`);
+      replacePost(await community.getPost(user.id, post.id));
     } catch (e: unknown) {
       Alert.alert('Report failed', getApiErrorMessage(e, 'Could not report comment'));
     } finally {
