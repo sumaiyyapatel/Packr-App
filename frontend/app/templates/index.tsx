@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, TextInput } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
+import { type as t, space, radius } from '../../src/theme/tokens';
+import { Kicker, Title, IconButton, Chip, TextField } from '../../src/components/ui';
 import { Template } from '../../src/lib/api';
 import { listTemplates } from '../../src/lib/firestoreRepo';
 
@@ -48,16 +50,10 @@ export default function TemplatesIndex() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
       <View style={[styles.header, { borderBottomColor: c.borderSubtle }]}>
-        <Pressable
-          testID="templates-back"
-          onPress={() => router.back()}
-          style={[styles.iconBtn, { borderColor: c.borderSubtle }]}
-        >
-          <Ionicons name="chevron-back" size={20} color={c.textPrimary} />
-        </Pressable>
-        <View style={{ marginLeft: 12 }}>
-          <Text style={[styles.kicker, { color: c.accent }]}>COMMUNITY</Text>
-          <Text style={[styles.title, { color: c.textPrimary }]}>Templates</Text>
+        <IconButton testID="templates-back" icon="chevron-back" accessibilityLabel="Back" onPress={() => router.back()} />
+        <View style={{ marginLeft: space.md }}>
+          <Kicker>COMMUNITY</Kicker>
+          <Title>Templates</Title>
         </View>
       </View>
 
@@ -66,65 +62,52 @@ export default function TemplatesIndex() {
           <ActivityIndicator color={c.accent} />
         </View>
       ) : (
-        <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 48, gap: 16 }}>
-          <TextInput
+        <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: space.xxxl, gap: space.lg }}>
+          <TextField
             value={q}
             onChangeText={setQ}
             placeholder="Search destination, season, style"
-            placeholderTextColor={c.textTertiary}
-            style={[styles.search, { color: c.textPrimary, borderColor: c.borderSubtle, backgroundColor: c.surface }]}
           />
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm }}>
             {(['all', 'official', 'community'] as const).map((item) => (
-              <Pressable
-                key={item}
-                onPress={() => setSource(item)}
-                style={[styles.filterChip, { borderColor: source === item ? c.accent : c.borderSubtle, backgroundColor: source === item ? c.accent : 'transparent' }]}
-              >
-                <Text style={{ color: source === item ? c.bg : c.textSecondary, fontSize: 11, fontWeight: '800' }}>{item.toUpperCase()}</Text>
-              </Pressable>
+              <Chip key={item} label={item.toUpperCase()} active={source === item} onPress={() => setSource(item)} />
             ))}
           </ScrollView>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm }}>
             {['', 'cold', 'cool', 'mild', 'warm', 'tropical'].map((item) => (
-              <Pressable
+              <Chip
                 key={item || 'any'}
+                label={(item || 'any climate').toUpperCase()}
+                active={climate === item}
                 onPress={() => setClimate(item)}
-                style={[styles.filterChip, { borderColor: climate === item ? c.accent : c.borderSubtle, backgroundColor: climate === item ? c.accent : 'transparent' }]}
-              >
-                <Text style={{ color: climate === item ? c.bg : c.textSecondary, fontSize: 11, fontWeight: '800' }}>{(item || 'any climate').toUpperCase()}</Text>
-              </Pressable>
+              />
             ))}
           </ScrollView>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm }}>
             {[
               { label: 'any length' },
               { label: 'weekend', min: 1, max: 3 },
               { label: '4-6 days', min: 4, max: 6 },
               { label: '1 week', min: 7, max: 8 },
               { label: '9+ days', min: 9 },
-            ].map((item) => {
-              const active = daysRange.label === item.label;
-              return (
-                <Pressable
-                  key={item.label}
-                  onPress={() => setDaysRange(item)}
-                  style={[styles.filterChip, { borderColor: active ? c.accent : c.borderSubtle, backgroundColor: active ? c.accent : 'transparent' }]}
-                >
-                  <Text style={{ color: active ? c.bg : c.textSecondary, fontSize: 11, fontWeight: '800' }}>{item.label.toUpperCase()}</Text>
-                </Pressable>
-              );
-            })}
+            ].map((item) => (
+              <Chip
+                key={item.label}
+                label={item.label.toUpperCase()}
+                active={daysRange.label === item.label}
+                onPress={() => setDaysRange(item)}
+              />
+            ))}
           </ScrollView>
-          {templates.map((t) => (
+          {templates.map((tpl) => (
             <Pressable
-              testID={`template-card-${t.id}`}
-              key={t.id}
-              onPress={() => router.push(`/templates/${t.id}`)}
+              testID={`template-card-${tpl.id}`}
+              key={tpl.id}
+              onPress={() => router.push(`/templates/${tpl.id}`)}
               style={({ pressed }) => [
                 styles.card,
                 {
-                  backgroundColor: c.surface,
+                  backgroundColor: c.elevated,
                   borderColor: c.borderSubtle,
                   transform: [{ scale: pressed ? 0.98 : 1 }],
                 },
@@ -134,21 +117,21 @@ export default function TemplatesIndex() {
                 <View
                   style={[
                     styles.climateChip,
-                    { backgroundColor: c.elevated, borderColor: c.borderActive },
+                    { backgroundColor: c.surface, borderColor: c.borderActive },
                   ]}
                 >
                   <Ionicons
-                    name={CLIMATE_ICON[t.climate] || 'cloud-outline'}
+                    name={CLIMATE_ICON[tpl.climate] || 'cloud-outline'}
                     size={14}
-                    color={c.accent}
+                    color={c.accentText}
                   />
-                  <Text style={{ color: c.accent, fontSize: 10, letterSpacing: 1, fontWeight: '600' }}>
-                    {t.climate.toUpperCase()}
+                  <Text style={[t.micro, { color: c.accentText }]}>
+                    {tpl.climate.toUpperCase()}
                   </Text>
                 </View>
-                {t.is_official && (
-                  <View style={[styles.officialChip, { borderColor: c.accent }]}>
-                    <Text style={{ color: c.accent, fontSize: 9, letterSpacing: 1, fontWeight: '600' }}>
+                {tpl.is_official && (
+                  <View style={[styles.officialChip, { borderColor: c.accentText }]}>
+                    <Text style={[t.micro, { color: c.accentText }]}>
                       OFFICIAL
                     </Text>
                   </View>
@@ -156,21 +139,21 @@ export default function TemplatesIndex() {
                 <View style={{ flex: 1 }} />
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                   <Ionicons name="heart-outline" size={14} color={c.textTertiary} />
-                  <Text style={{ color: c.textTertiary, fontSize: 12, marginLeft: 4 }}>
-                    {t.likes}
+                  <Text style={[t.micro, { color: c.textTertiary, marginLeft: 4 }]}>
+                    {tpl.likes}
                   </Text>
                 </View>
               </View>
 
-              <Text style={[styles.cardTitle, { color: c.textPrimary }]} numberOfLines={2}>
-                {t.title}
+              <Text style={[t.h2, { color: c.textPrimary, marginTop: space.md }]} numberOfLines={2}>
+                {tpl.title}
               </Text>
-              <Text style={{ color: c.textSecondary, fontSize: 13, marginTop: 8 }} numberOfLines={2}>
-                {t.description}
+              <Text style={[t.bodySm, { color: c.textSecondary, marginTop: space.sm }]} numberOfLines={2}>
+                {tpl.description}
               </Text>
 
               <View style={[styles.swatches, { borderTopColor: c.borderSubtle }]}>
-                {t.items.slice(0, 9).map((it, idx) => (
+                {tpl.items.slice(0, 9).map((it, idx) => (
                   <View
                     key={idx}
                     style={[
@@ -183,8 +166,8 @@ export default function TemplatesIndex() {
                   />
                 ))}
                 <View style={{ flex: 1 }} />
-                <Text style={{ color: c.textTertiary, fontSize: 11 }}>
-                  {t.days}d - {t.season}
+                <Text style={[t.micro, { color: c.textTertiary }]}>
+                  {tpl.days}d - {tpl.season}
                 </Text>
               </View>
             </Pressable>
@@ -196,24 +179,18 @@ export default function TemplatesIndex() {
 }
 
 const styles = StyleSheet.create({
-  header: { flexDirection: 'row', alignItems: 'center', padding: 16, borderBottomWidth: 1 },
-  iconBtn: { width: 36, height: 36, borderWidth: 1, borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
-  kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
-  title: { fontSize: 24, fontWeight: '700', letterSpacing: -1 },
-  card: { borderWidth: 1, borderRadius: 8, padding: 16, gap: 4 },
-  search: { borderWidth: 1, borderRadius: 8, minHeight: 44, paddingHorizontal: 12 },
-  filterChip: { height: 34, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center' },
+  header: { flexDirection: 'row', alignItems: 'center', padding: space.lg, borderBottomWidth: 1 },
+  card: { borderWidth: 1, borderRadius: radius.sharp, padding: space.lg },
   climateChip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999,
+    borderWidth: 1, paddingHorizontal: space.sm, paddingVertical: space.xs, borderRadius: radius.pill,
   },
   officialChip: {
-    borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, marginLeft: 8,
+    borderWidth: 1, paddingHorizontal: space.sm, paddingVertical: space.xs, borderRadius: radius.pill, marginLeft: space.sm,
   },
-  cardTitle: { fontSize: 18, fontWeight: '700', letterSpacing: -0.5, marginTop: 12 },
   swatches: {
     flexDirection: 'row', gap: 4, alignItems: 'center', borderTopWidth: 1,
-    paddingTop: 12, marginTop: 12,
+    paddingTop: space.md, marginTop: space.md,
   },
   swatch: { width: 14, height: 14, borderRadius: 3, borderWidth: 1 },
 });

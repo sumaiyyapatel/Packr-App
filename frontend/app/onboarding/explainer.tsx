@@ -52,7 +52,7 @@ export default function Explainer() {
 
   return (
     <ScrollView style={{ flex: 1, backgroundColor: c.bg }} contentContainerStyle={[styles.container, { minHeight: height }]}>
-      <Text style={[styles.kicker, { color: c.accent }]}>PACKR METHOD</Text>
+      <Text style={[styles.kicker, { color: c.accentText }]}>PACKR METHOD</Text>
       <Text style={[styles.h1, { color: c.textPrimary }]}>Fill the grid.</Text>
       <Text style={[styles.body, { color: c.textSecondary }]}>
         Tap each slot once. Three tops, three bottoms, and three layers unlock 27 outfit combinations.
@@ -74,7 +74,7 @@ export default function Explainer() {
                 },
               ]}
             >
-              <Text style={{ color: active ? c.accent : c.textTertiary, fontSize: 26, fontWeight: '900' }}>
+              <Text style={{ color: active ? c.accentText : c.textTertiary, fontSize: 26, fontWeight: '900' }}>
                 {CATEGORY_LABELS[category]}
               </Text>
               <Text style={{ color: c.textTertiary, fontSize: 10, marginTop: 4 }}>{index + 1}</Text>
@@ -113,7 +113,7 @@ export default function Explainer() {
           { backgroundColor: complete ? c.accent : c.borderActive, opacity: pressed ? 0.85 : 1 },
         ]}
       >
-        <Text style={[styles.btnText, { color: c.bg }]}>{complete ? 'Create trip' : 'Fill all slots'}</Text>
+        <Text style={[styles.btnText, { color: complete ? c.accentInk : c.textPrimary }]}>{complete ? 'Create trip' : 'Fill all slots'}</Text>
       </Pressable>
     </ScrollView>
   );

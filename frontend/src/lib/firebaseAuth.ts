@@ -214,6 +214,56 @@ export async function getCurrentFirebaseToken() {
   });
 }
 
+/** 'password' | 'google.com' | null (no signed-in user) */
+export function currentAuthProvider(): string | null {
+  const auth = getFirebaseAuth();
+  return auth?.currentUser?.providerData[0]?.providerId ?? null;
+}
+
+/**
+ * Deletes the signed-in Firebase Auth user. Firebase requires a *recent*
+ * sign-in for this; if the session is stale it throws `auth/requires-recent-login`
+ * and we reauthenticate once before retrying:
+ *  - password accounts: re-verify with the password the caller collected
+ *  - Google accounts: re-run the Google flow (a fresh sign-in resets recency)
+ * Call this AFTER wiping Firestore data — once the user is deleted, Firestore
+ * security rules (which check request.auth.uid) can no longer be satisfied.
+ */
+export async function deleteFirebaseUser(password?: string): Promise<void> {
+  const auth = getFirebaseAuth();
+  const user = auth?.currentUser;
+  if (!auth || !user) throw new Error('Not signed in');
+
+  try {
+    await FirebaseAuth.deleteUser(user);
+    return;
+  } catch (error: unknown) {
+    const code = (error as { code?: string }).code;
+    if (code !== 'auth/requires-recent-login') throw error;
+  }
+
+  const providerId = user.providerData[0]?.providerId;
+  if (providerId === 'password') {
+    if (!password) throw new Error('Re-enter your password to confirm account deletion.');
+    if (!user.email) throw new Error('This account has no email on file to reauthenticate with.');
+    await FirebaseAuth.reauthenticateWithCredential(
+      user,
+      FirebaseAuth.EmailAuthProvider.credential(user.email, password)
+    );
+  } else if (providerId === 'google.com') {
+    const originalUid = user.uid;
+    const refreshedToken = Platform.OS === 'web' ? await loginWithGooglePopup() : await loginWithNativeGoogle();
+    if (!refreshedToken) throw new Error('Could not re-verify your Google sign-in. Try again.');
+    if (auth.currentUser?.uid !== originalUid) {
+      throw new Error('That Google account does not match the account you are deleting. Try again.');
+    }
+  } else {
+    throw new Error('Could not re-verify your sign-in. Sign out and back in, then try again.');
+  }
+
+  await FirebaseAuth.deleteUser(auth.currentUser ?? user);
+}
+
 export async function logoutFirebase() {
   const auth = getFirebaseAuth();
   if (Platform.OS === 'android' && !isExpoGo()) {

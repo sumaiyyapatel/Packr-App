@@ -5,10 +5,9 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  TextInput,
   Modal,
-  ActivityIndicator,
   Alert,
+  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
@@ -17,11 +16,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
+import { type as t, space, radius } from '../../src/theme/tokens';
+import { ScreenHeader, IconButton, Chip, CatalogCard, TextField, Button } from '../../src/components/ui';
 import { useStore } from '../../src/lib/store';
 import { api, getApiErrorMessage, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
 import { trackEvent } from '../../src/lib/analytics';
 import { uploadWardrobeImage } from '../../src/lib/storage';
-import { downscaleToDataUri, ensureFirestoreSafeImage } from '../../src/lib/images';
+import { downscaleToDataUri, ensureFirestoreSafeImage, cropRegionDataUri, CropRegion } from '../../src/lib/images';
+import { listPrivateTemplates, deletePrivateTemplate, PrivateTemplate } from '../../src/lib/firestoreRepo';
 import {
   CATEGORY_META,
   CATEGORY_ORDER,
@@ -42,6 +44,8 @@ export default function Studio() {
   const [filter, setFilter] = useState<Filter>('all');
   const [showEditor, setShowEditor] = useState(false);
   const [editingItem, setEditingItem] = useState<WardrobeItem | null>(null);
+  const [showBatchImport, setShowBatchImport] = useState(false);
+  const [showMyTemplates, setShowMyTemplates] = useState(false);
 
   const items = useMemo(
     () => (filter === 'all' ? wardrobe : wardrobe.filter((w) => w.category === filter)),
@@ -81,44 +85,44 @@ export default function Studio() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
-        <View style={styles.headerRow}>
-          <View>
-            <Text style={[styles.kicker, { color: c.accent }]}>STUDIO</Text>
-            <Text style={[styles.h1, { color: c.textPrimary }]}>Wardrobe</Text>
-          </View>
-          <Pressable testID="studio-add-button" onPress={openNew} style={[styles.addBtn, { backgroundColor: c.accent }]}>
-            <Ionicons name="add" size={22} color={c.bg} />
-          </Pressable>
-        </View>
+        <ScreenHeader
+          kicker="STUDIO"
+          title="Wardrobe"
+          right={
+            <View style={{ flexDirection: 'row', gap: space.sm }}>
+              <IconButton
+                testID="studio-templates-button"
+                icon="bookmark-outline"
+                accessibilityLabel="My templates"
+                onPress={() => setShowMyTemplates(true)}
+              />
+              <IconButton
+                testID="studio-batch-button"
+                icon="images-outline"
+                accessibilityLabel="Add multiple photos"
+                onPress={() => setShowBatchImport(true)}
+              />
+              <Pressable testID="studio-add-button" onPress={openNew} style={[styles.addBtn, { backgroundColor: c.accent }]}>
+                <Ionicons name="add" size={22} color={c.accentInk} />
+              </Pressable>
+            </View>
+          }
+        />
 
         <View style={styles.filterRow}>
           {(['all', ...CATEGORY_ORDER] as Filter[]).map((f) => {
             const isActive = filter === f;
             const count = f === 'all' ? wardrobe.length : wardrobe.filter((w) => w.category === f).length;
             const meta = f === 'all' ? null : CATEGORY_META[f];
-            const activeColor = meta?.color || c.accent;
             return (
-              <Pressable
-                testID={`filter-${f}`}
+              <Chip
                 key={f}
+                testID={`filter-${f}`}
+                label={`${meta?.short || 'ALL'} ${count}`}
+                icon={(meta?.icon || 'apps-outline') as keyof typeof Ionicons.glyphMap}
+                active={isActive}
                 onPress={() => setFilter(f)}
-                style={[
-                  styles.filterChip,
-                  {
-                    backgroundColor: isActive ? activeColor : 'transparent',
-                    borderColor: isActive ? activeColor : c.borderSubtle,
-                  },
-                ]}
-              >
-                {meta ? (
-                  <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={13} color={isActive ? '#000' : meta.color} />
-                ) : (
-                  <Ionicons name="apps-outline" size={13} color={isActive ? c.bg : c.textSecondary} />
-                )}
-                <Text style={[styles.filterText, { color: isActive ? '#000' : c.textSecondary }]}>
-                  {(meta?.short || 'ALL')} {count}
-                </Text>
-              </Pressable>
+              />
             );
           })}
         </View>
@@ -151,10 +155,122 @@ export default function Studio() {
           closeEditor();
         }}
       />
+
+      <BatchImportModal
+        visible={showBatchImport}
+        onClose={() => setShowBatchImport(false)}
+        onItemSaved={upsertWardrobeItem}
+      />
+
+      <MyTemplatesModal visible={showMyTemplates} onClose={() => setShowMyTemplates(false)} />
     </SafeAreaView>
   );
 }
 
+// Repack flow, part 2: apply or manage the private templates saved from Lookbook's
+// "Save as template" action (users/{uid}/private_templates — owner-only, never public).
+function MyTemplatesModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  const { c } = useTheme();
+  const selectedTripId = useStore((s) => s.selectedTripId);
+  const applyTemplateToTrip = useStore((s) => s.applyTemplateToTrip);
+  const [templates, setTemplates] = useState<PrivateTemplate[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [applyingId, setApplyingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    const uid = useStore.getState().user?.id;
+    if (!uid) return;
+    setLoading(true);
+    listPrivateTemplates(uid)
+      .then(setTemplates)
+      .catch(() => setTemplates([]))
+      .finally(() => setLoading(false));
+  }, [visible]);
+
+  const onApply = async (tpl: PrivateTemplate) => {
+    if (!selectedTripId) {
+      Alert.alert('No trip selected', 'Create or select a trip first.');
+      return;
+    }
+    setApplyingId(tpl.id);
+    try {
+      await applyTemplateToTrip(selectedTripId, tpl.items);
+      onClose();
+      Alert.alert('Applied', `${tpl.name} loaded into your grid.`);
+    } catch (e: unknown) {
+      Alert.alert('Could not apply template', getApiErrorMessage(e, 'Try again'));
+    } finally {
+      setApplyingId(null);
+    }
+  };
+
+  const onDelete = (tpl: PrivateTemplate) => {
+    Alert.alert('Delete template?', tpl.name, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          const uid = useStore.getState().user?.id;
+          if (!uid) return;
+          await deletePrivateTemplate(uid, tpl.id).catch(() => {});
+          setTemplates((prev) => prev.filter((x) => x.id !== tpl.id));
+        },
+      },
+    ]);
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent={false}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
+        <View style={[styles.editorContainer, { flex: 1 }]}>
+          <ScreenHeader
+            kicker="REPACK"
+            title="My templates"
+            right={<IconButton icon="close" accessibilityLabel="Close" onPress={onClose} />}
+          />
+
+          {loading ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+              <ActivityIndicator color={c.accent} />
+            </View>
+          ) : templates.length === 0 ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: space.sm, padding: space.xl }}>
+              <Ionicons name="bookmark-outline" size={32} color={c.textTertiary} />
+              <Text style={[t.body, { color: c.textSecondary, textAlign: 'center' }]}>
+                Save a completed grid as a template from the Lookbook screen after a trip ends.
+              </Text>
+            </View>
+          ) : (
+            <View style={{ gap: space.sm, marginTop: space.lg }}>
+              {templates.map((tpl) => (
+                <View key={tpl.id} style={[styles.templateRow, { borderColor: c.borderSubtle, backgroundColor: c.elevated }]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[t.title, { color: c.textPrimary }]}>{tpl.name}</Text>
+                    <Text style={[t.micro, { color: c.textTertiary, marginTop: 2 }]}>{tpl.items.length} items</Text>
+                  </View>
+                  <Button
+                    title="Apply"
+                    onPress={() => onApply(tpl)}
+                    loading={applyingId === tpl.id}
+                    disabled={applyingId != null}
+                  />
+                  <Pressable onPress={() => onDelete(tpl)} hitSlop={8} style={{ marginLeft: space.sm }}>
+                    <Ionicons name="trash-outline" size={18} color={c.textTertiary} />
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+// Museum-catalog card per the v2 design system: plate + name + monochrome meta.
+// Category colour is retired here — only the physical garment's own colours (swatches) remain.
 function ItemCard({
   item,
   onPress,
@@ -167,60 +283,29 @@ function ItemCard({
   const { c } = useTheme();
   const meta = CATEGORY_META[item.category];
   return (
-    <Pressable
-      testID={`wardrobe-item-${item.id}`}
-      onPress={onPress}
-      onLongPress={onLong}
-      style={({ pressed }) => [
-        styles.card,
-        {
-          backgroundColor: c.surface,
-          borderColor: pressed ? meta.color : c.borderSubtle,
-          transform: [{ scale: pressed ? 0.98 : 1 }],
-        },
-      ]}
-    >
-      <View style={[styles.categoryRail, { backgroundColor: meta.color }]} />
-      <View style={[styles.imgWrap, { backgroundColor: c.elevated }]}>
-        {item.image ? (
-          <Image
-            source={{ uri: resolveApiAssetUrl(item.image) }}
-            style={styles.img}
-            contentFit="contain"
-          />
-        ) : (
-          <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={34} color={meta.color} />
-        )}
-        <View style={[styles.catTag, { backgroundColor: '#050505', borderColor: meta.color }]}>
-          <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={11} color={meta.color} />
-          <Text style={[styles.catTagText, { color: meta.color }]}>{meta.short}</Text>
-        </View>
-        <View style={[styles.editDot, { backgroundColor: c.bg, borderColor: c.borderSubtle }]}>
-          <Ionicons name="create-outline" size={13} color={c.textSecondary} />
-        </View>
-      </View>
-      <View style={styles.cardBody}>
-        <Text numberOfLines={1} style={{ color: c.textPrimary, fontWeight: '800', fontSize: 15 }}>
-          {item.name}
-        </Text>
-        <View style={styles.tagPreviewRow}>
-          {(item.tags || []).slice(0, 2).map((tag) => (
-            <View key={tag} style={[styles.smallTag, { borderColor: c.borderSubtle, backgroundColor: c.elevated }]}>
-              <Text style={{ color: c.textTertiary, fontSize: 9, fontWeight: '700' }}>#{tag}</Text>
-            </View>
-          ))}
-        </View>
+    <Pressable testID={`wardrobe-item-${item.id}`} onLongPress={onLong} style={styles.card}>
+      <CatalogCard
+        name={item.name}
+        meta={`${meta.short} · ${Number(item.weight_kg || 0).toFixed(1)} kg`}
+        onPress={onPress}
+        image={
+          item.image ? (
+            <Image source={{ uri: resolveApiAssetUrl(item.image) }} style={styles.img} contentFit="contain" />
+          ) : (
+            <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={34} color={c.textTertiary} />
+          )
+        }
+      />
+      {(item.colors || []).length > 0 || (item.tags || []).length > 0 ? (
         <View style={styles.metaRow}>
           <View style={styles.swatchRow}>
             {(item.colors || []).slice(0, 3).map((col, i) => (
               <View key={`${col}-${i}`} style={[styles.swatch, { backgroundColor: col, borderColor: c.borderSubtle }]} />
             ))}
           </View>
-          <Text style={{ color: c.textTertiary, fontSize: 11 }}>
-            {Number(item.weight_kg || 0).toFixed(1)}kg
-          </Text>
+          {item.tags?.[0] ? <Text style={[t.micro, { color: c.textTertiary }]}>#{item.tags[0]}</Text> : null}
         </View>
-      </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -400,25 +485,15 @@ function ItemEditorModal({
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <ScrollView contentContainerStyle={styles.editorContainer} keyboardShouldPersistTaps="handled">
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={[styles.kicker, { color: c.accent }]}>{editing ? 'EDIT ITEM' : 'NEW ITEM'}</Text>
-                <Text style={[styles.h1, { color: c.textPrimary }]}>{editing ? 'Details' : 'Add item'}</Text>
-              </View>
-              <Pressable testID="add-modal-close" onPress={onClose} style={[styles.iconBtn, { borderColor: c.borderSubtle }]}>
-                <Ionicons name="close" size={20} color={c.textPrimary} />
-              </Pressable>
-            </View>
+            <ScreenHeader
+              kicker={editing ? 'EDIT ITEM' : 'NEW ITEM'}
+              title={editing ? 'Details' : 'Add item'}
+              right={<IconButton testID="add-modal-close" icon="close" accessibilityLabel="Close" onPress={onClose} />}
+            />
 
             <View style={styles.photoActions}>
-              <Pressable testID="pick-camera" onPress={() => pickPhoto(true)} style={[styles.photoBtn, { borderColor: c.borderActive }]}>
-                <Ionicons name="camera-outline" size={18} color={c.textPrimary} />
-                <Text style={{ color: c.textPrimary, marginLeft: 8 }}>Camera</Text>
-              </Pressable>
-              <Pressable testID="pick-library" onPress={() => pickPhoto(false)} style={[styles.photoBtn, { borderColor: c.borderActive }]}>
-                <Ionicons name="image-outline" size={18} color={c.textPrimary} />
-                <Text style={{ color: c.textPrimary, marginLeft: 8 }}>Library</Text>
-              </Pressable>
+              <Button testID="pick-camera" title="Camera" icon="camera-outline" variant="secondary" onPress={() => pickPhoto(true)} style={{ flex: 1 }} />
+              <Button testID="pick-library" title="Library" icon="image-outline" variant="secondary" onPress={() => pickPhoto(false)} style={{ flex: 1 }} />
             </View>
 
             <View style={[styles.preview, { backgroundColor: c.surface, borderColor: c.borderSubtle }]}>
@@ -429,24 +504,19 @@ function ItemEditorModal({
                   contentFit="contain"
                 />
               ) : (
-                <Ionicons name={CATEGORY_META[category].icon as keyof typeof Ionicons.glyphMap} size={34} color={CATEGORY_META[category].color} />
+                <Ionicons name={CATEGORY_META[category].icon as keyof typeof Ionicons.glyphMap} size={34} color={c.textTertiary} />
               )}
             </View>
 
-            <Pressable
+            <Button
+              title="Remove background"
+              icon="cut-outline"
+              variant="secondary"
               onPress={cleanBackground}
-              disabled={!imageBase64.startsWith('data:') || cleaning}
-              style={[styles.cleanBtn, { borderColor: c.borderActive, opacity: !imageBase64.startsWith('data:') ? 0.45 : 1 }]}
-            >
-              {cleaning ? (
-                <ActivityIndicator color={c.textPrimary} />
-              ) : (
-                <>
-                  <Ionicons name="cut-outline" size={16} color={c.textPrimary} />
-                  <Text style={{ color: c.textPrimary, fontSize: 12, fontWeight: '800' }}>Remove background</Text>
-                </>
-              )}
-            </Pressable>
+              disabled={!imageBase64.startsWith('data:')}
+              loading={cleaning}
+              style={{ marginTop: space.sm }}
+            />
 
             <Pressable
               onPress={() => setAutoClean((current) => !current)}
@@ -458,30 +528,30 @@ function ItemEditorModal({
                 color={autoClean ? c.accent : c.textTertiary}
               />
               <View style={{ flex: 1 }}>
-                <Text style={{ color: c.textPrimary, fontSize: 13, fontWeight: '800' }}>Auto clean on save</Text>
-                <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 2 }}>
+                <Text style={[t.title, { color: c.textPrimary }]}>Auto clean on save</Text>
+                <Text style={[t.micro, { color: c.textTertiary, marginTop: 2 }]}>
                   Keeps product-style photos optional if the cutout misses.
                 </Text>
               </View>
             </Pressable>
 
-            <Text style={[styles.label, { color: c.textTertiary }]}>NAME</Text>
-            <TextInput
-              testID="item-name-input"
-              value={name}
-              onChangeText={(value) => {
-                setName(value);
-                if (!editing && !categoryTouched) {
-                  const inferred = inferCategoryFromName(value);
-                  if (inferred) setCategory(inferred);
-                }
-              }}
-              placeholder="Black tee"
-              placeholderTextColor={c.textTertiary}
-              style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive }]}
-            />
+            <View style={{ marginTop: space.lg }}>
+              <TextField
+                testID="item-name-input"
+                label="NAME"
+                value={name}
+                onChangeText={(value) => {
+                  setName(value);
+                  if (!editing && !categoryTouched) {
+                    const inferred = inferCategoryFromName(value);
+                    if (inferred) setCategory(inferred);
+                  }
+                }}
+                placeholder="Black tee"
+              />
+            </View>
 
-            <Text style={[styles.label, { color: c.textTertiary }]}>TYPE</Text>
+            <Text style={[t.kicker, { color: c.textTertiary, marginTop: space.lg, marginBottom: space.sm }]}>TYPE</Text>
             <View style={styles.categoryPicker}>
               {CATEGORY_ORDER.map((cat) => {
                 const meta = CATEGORY_META[cat];
@@ -497,13 +567,13 @@ function ItemEditorModal({
                     style={[
                       styles.categoryOption,
                       {
-                        borderColor: active ? meta.color : c.borderSubtle,
-                        backgroundColor: active ? meta.soft : c.surface,
+                        borderColor: active ? c.accent : c.borderSubtle,
+                        backgroundColor: active ? c.accentSoft : c.surface,
                       },
                     ]}
                   >
-                    <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={20} color={meta.color} />
-                    <Text style={{ color: active ? meta.color : c.textSecondary, fontSize: 12, fontWeight: '800' }}>
+                    <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={20} color={active ? c.accent : c.textTertiary} />
+                    <Text style={[t.label, { color: active ? c.textPrimary : c.textSecondary }]}>
                       {meta.short}
                     </Text>
                   </Pressable>
@@ -511,68 +581,245 @@ function ItemEditorModal({
               })}
             </View>
 
-            <Text style={[styles.label, { color: c.textTertiary }]}>TAGS</Text>
+            <Text style={[t.kicker, { color: c.textTertiary, marginTop: space.lg, marginBottom: space.sm }]}>TAGS</Text>
             <View style={styles.tagBank}>
-              {TAG_PRESETS.map((tag) => {
-                const active = selectedTags.includes(tag);
-                return (
-                  <Pressable
-                    key={tag}
-                    onPress={() => toggleTag(tag)}
-                    style={[
-                      styles.tagChip,
-                      {
-                        borderColor: active ? c.accent : c.borderSubtle,
-                        backgroundColor: active ? c.accent : 'transparent',
-                      },
-                    ]}
-                  >
-                    <Text style={{ color: active ? c.bg : c.textSecondary, fontSize: 11, fontWeight: '700' }}>
-                      #{tag}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+              {TAG_PRESETS.map((tag) => (
+                <Chip key={tag} label={`#${tag}`} active={selectedTags.includes(tag)} onPress={() => toggleTag(tag)} />
+              ))}
             </View>
 
-            <TextInput
-              testID="item-tags-input"
-              value={tagsText}
-              onChangeText={setTagsText}
-              placeholder="custom tags"
-              placeholderTextColor={c.textTertiary}
-              autoCapitalize="none"
-              style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive, marginTop: 10 }]}
-            />
+            <View style={{ marginTop: space.md }}>
+              <TextField
+                testID="item-tags-input"
+                value={tagsText}
+                onChangeText={setTagsText}
+                placeholder="custom tags"
+                autoCapitalize="none"
+              />
+            </View>
 
-            <Text style={[styles.label, { color: c.textTertiary }]}>WEIGHT KG</Text>
-            <TextInput
-              testID="item-weight-input"
-              value={weight}
-              onChangeText={setWeight}
-              keyboardType="decimal-pad"
-              style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive }]}
-            />
+            <View style={{ marginTop: space.lg }}>
+              <TextField
+                testID="item-weight-input"
+                label="WEIGHT KG"
+                value={weight}
+                onChangeText={setWeight}
+                keyboardType="decimal-pad"
+              />
+            </View>
 
-            {err ? <Text style={{ color: c.error, marginTop: 12 }}>{err}</Text> : null}
+            {err ? <Text style={[t.micro, { color: c.error, marginTop: 12 }]}>{err}</Text> : null}
 
-            <Pressable
+            <Button
               testID="save-item-button"
+              title={editing ? 'Save changes' : 'Save item'}
               onPress={onSave}
-              disabled={saving}
-              style={({ pressed }) => [
-                styles.saveBtn,
-                { backgroundColor: c.accent, opacity: pressed ? 0.85 : 1 },
-              ]}
-            >
-              {saving ? (
-                <ActivityIndicator color={c.bg} />
-              ) : (
-                <Text style={{ color: c.bg, fontWeight: '800' }}>{editing ? 'Save changes' : 'Save item'}</Text>
-              )}
-            </Pressable>
+              loading={saving}
+              style={{ marginTop: space.xl }}
+            />
           </ScrollView>
         </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+// Batch import: multi-select → downscale → one-tap category triage.
+// Deliberately skips cutout/palette calls (those are per-item polish via the
+// normal editor) so N photos don't block on N sequential network round-trips.
+function BatchImportModal({
+  visible,
+  onClose,
+  onItemSaved,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onItemSaved: (item: WardrobeItem) => void;
+}) {
+  const { c } = useTheme();
+  const [phase, setPhase] = useState<'pick' | 'preparing' | 'triage' | 'done'>('pick');
+  const [queue, setQueue] = useState<string[]>([]);
+  const [index, setIndex] = useState(0);
+  const [savedCount, setSavedCount] = useState(0);
+  const [savedByCategory, setSavedByCategory] = useState<Record<WardrobeCategory, number>>({
+    top: 0,
+    bottom: 0,
+    layer: 0,
+  });
+  const [saving, setSaving] = useState<WardrobeCategory | null>(null);
+  const [cropping, setCropping] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    setPhase('pick');
+    setQueue([]);
+    setIndex(0);
+    setSavedCount(0);
+    setSavedByCategory({ top: 0, bottom: 0, layer: 0 });
+    setErr(null);
+  }, [visible]);
+
+  const pickPhotos = async () => {
+    setErr(null);
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      setErr('Photos permission denied');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      quality: 0.9,
+      allowsMultipleSelection: true,
+      selectionLimit: 0,
+    });
+    if (result.canceled || !result.assets.length) return;
+
+    setPhase('preparing');
+    try {
+      const dataUris = await Promise.all(result.assets.map((a) => downscaleToDataUri(a.uri)));
+      setQueue(dataUris);
+      setIndex(0);
+      setPhase('triage');
+    } catch {
+      setErr('Could not process one or more photos. Try again.');
+      setPhase('pick');
+    }
+  };
+
+  const advance = () => {
+    if (index + 1 >= queue.length) setPhase('done');
+    else setIndex((i) => i + 1);
+  };
+
+  // A photo showing several garments (a catalog screenshot, a flat-lay) would
+  // otherwise become a single mislabeled wardrobe item — this is the guardrail.
+  const crop = async (region: CropRegion) => {
+    setCropping(true);
+    setErr(null);
+    try {
+      const cropped = await cropRegionDataUri(queue[index], region);
+      setQueue((prev) => prev.map((uri, i) => (i === index ? cropped : uri)));
+    } catch {
+      setErr('Could not crop this photo. You can still continue with the full image.');
+    } finally {
+      setCropping(false);
+    }
+  };
+
+  const assign = async (category: WardrobeCategory) => {
+    const dataUri = queue[index];
+    setSaving(category);
+    setErr(null);
+    try {
+      const uid = useStore.getState().user?.id;
+      if (!uid) throw new Error('Not signed in');
+      let image = dataUri;
+      try {
+        image = await uploadWardrobeImage(uid, dataUri);
+      } catch {
+        image = await ensureFirestoreSafeImage(dataUri);
+      }
+      const label = `New ${category}`;
+      const count = savedByCategory[category] + 1;
+      const saved = await useStore.getState().saveWardrobe({
+        name: count > 1 ? `${label} ${count}` : label,
+        category,
+        image,
+        colors: [],
+        weight_kg: 0.3,
+        tags: [],
+      });
+      onItemSaved(saved);
+      setSavedByCategory((prev) => ({ ...prev, [category]: count }));
+      setSavedCount((n) => n + 1);
+      trackEvent('wardrobe_item_added', { category, source: 'batch_import' });
+      advance();
+    } catch (e: unknown) {
+      setErr(getApiErrorMessage(e, 'Could not save this item'));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent={false}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
+        <View style={[styles.editorContainer, { flex: 1 }]}>
+          <ScreenHeader
+            kicker="BATCH IMPORT"
+            title={phase === 'triage' ? 'Assign category' : 'Add multiple items'}
+            subtitle={phase === 'triage' ? `${index + 1} of ${queue.length}` : undefined}
+            right={<IconButton icon="close" accessibilityLabel="Close" onPress={onClose} />}
+          />
+
+          {phase === 'pick' ? (
+            <View style={{ marginTop: space.xxl, gap: space.md }}>
+              <Text style={[t.body, { color: c.textSecondary }]}>
+                Select several photos at once, then tap a category for each one. You can rename and
+                polish them later from the wardrobe grid.
+              </Text>
+              <Button title="Choose photos" icon="images-outline" onPress={pickPhotos} style={{ marginTop: space.sm }} />
+            </View>
+          ) : null}
+
+          {phase === 'preparing' ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+              <ActivityIndicator color={c.accent} />
+              <Text style={[t.micro, { color: c.textTertiary, marginTop: space.md }]}>Preparing photos…</Text>
+            </View>
+          ) : null}
+
+          {phase === 'triage' && queue[index] ? (
+            <View style={{ flex: 1 }}>
+              <Text style={[t.bodySm, { color: c.textSecondary, marginTop: space.lg }]}>
+                Make sure this photo shows one item — crop it first if it&apos;s a multi-item photo
+                (a catalog screenshot, a flat-lay of several pieces).
+              </Text>
+              <View style={[styles.preview, { backgroundColor: c.surface, borderColor: c.borderSubtle, marginTop: space.md }]}>
+                {cropping ? (
+                  <ActivityIndicator color={c.accent} />
+                ) : (
+                  <Image source={{ uri: queue[index] }} style={styles.previewImg} contentFit="contain" />
+                )}
+              </View>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.md }}>
+                {(['center', 'left', 'right', 'top', 'bottom'] as CropRegion[]).map((region) => (
+                  <Chip
+                    key={region}
+                    label={region.toUpperCase()}
+                    onPress={() => crop(region)}
+                  />
+                ))}
+              </View>
+              <View style={{ gap: space.sm, marginTop: space.lg }}>
+                {CATEGORY_ORDER.map((cat) => (
+                  <Button
+                    key={cat}
+                    title={CATEGORY_META[cat].short}
+                    icon={CATEGORY_META[cat].icon as keyof typeof Ionicons.glyphMap}
+                    onPress={() => assign(cat)}
+                    loading={saving === cat}
+                    disabled={saving != null || cropping}
+                  />
+                ))}
+                <Button title="Skip this photo" variant="ghost" onPress={advance} disabled={saving != null || cropping} />
+              </View>
+            </View>
+          ) : null}
+
+          {phase === 'done' ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: space.md }}>
+              <Ionicons name="checkmark-circle-outline" size={40} color={c.accent} />
+              <Text style={[t.h2, { color: c.textPrimary }]}>
+                Added {savedCount} item{savedCount === 1 ? '' : 's'}
+              </Text>
+              <Button title="Import more" variant="secondary" onPress={() => setPhase('pick')} />
+              <Button title="Done" onPress={onClose} />
+            </View>
+          ) : null}
+
+          {err ? <Text style={[t.bodySm, { color: c.error, marginTop: space.md }]}>{err}</Text> : null}
+        </View>
       </SafeAreaView>
     </Modal>
   );
@@ -621,59 +868,30 @@ function inferCategoryFromName(value: string): WardrobeCategory | null {
 
 const styles = StyleSheet.create({
   container: { padding: 20, paddingTop: 16, paddingBottom: 48 },
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
-  kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '700' },
-  h1: { fontSize: 32, fontWeight: '800', marginTop: 4 },
-  addBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
-  iconBtn: { width: 38, height: 38, borderWidth: 1, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 18, marginBottom: 18 },
-  filterChip: { height: 34, paddingHorizontal: 11, borderRadius: 8, borderWidth: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
-  filterText: { fontSize: 11, letterSpacing: 0.8, fontWeight: '800' },
-  empty: { borderWidth: 1, borderRadius: 8, padding: 32, alignItems: 'center', borderStyle: 'dashed' },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'space-between' },
-  card: { width: '48%', borderWidth: 1, borderRadius: 8, overflow: 'hidden', position: 'relative' },
-  categoryRail: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, zIndex: 2 },
-  imgWrap: { aspectRatio: 0.9, alignItems: 'center', justifyContent: 'center', position: 'relative', padding: 6 },
+  addBtn: { width: 44, height: 44, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center' },
+  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.lg, marginBottom: space.lg },
+  empty: { borderWidth: 1, borderRadius: radius.sharp, padding: space.xxl, alignItems: 'center', borderStyle: 'dashed' },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: space.md, justifyContent: 'space-between' },
+  card: { width: '48%', gap: space.xs },
   img: { width: '100%', height: '100%' },
-  catTag: { position: 'absolute', top: 8, left: 10, borderWidth: 1, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 4, flexDirection: 'row', alignItems: 'center', gap: 4 },
-  catTagText: { fontSize: 9, letterSpacing: 1, fontWeight: '900' },
-  editDot: { position: 'absolute', top: 8, right: 8, width: 27, height: 27, borderWidth: 1, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
-  cardBody: { padding: 12, gap: 8 },
-  tagPreviewRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, minHeight: 18 },
-  smallTag: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 6, paddingVertical: 2 },
   metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   swatchRow: { flexDirection: 'row', gap: 4 },
   swatch: { width: 12, height: 12, borderRadius: 6, borderWidth: 1 },
   editorContainer: { padding: 20, paddingBottom: 48 },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  photoActions: { flexDirection: 'row', gap: 10, marginTop: 18 },
-  photoBtn: { flex: 1, height: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderRadius: 8 },
-  preview: { width: '100%', aspectRatio: 1, marginTop: 12, borderWidth: 1, borderRadius: 8, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', padding: 10 },
+  photoActions: { flexDirection: 'row', gap: space.sm, marginTop: space.lg },
+  preview: { width: '100%', aspectRatio: 1, marginTop: space.md, borderWidth: 1, borderRadius: radius.sharp, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', padding: 10 },
   previewImg: { width: '100%', height: '100%' },
-  cleanBtn: {
-    height: 42,
-    borderWidth: 1,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 10,
-  },
   autoCleanRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: space.md,
     borderWidth: 1,
-    borderRadius: 8,
-    padding: 10,
-    marginTop: 10,
+    borderRadius: radius.sharp,
+    padding: space.md,
+    marginTop: space.sm,
   },
-  label: { fontSize: 11, letterSpacing: 1.4, marginBottom: 6, marginTop: 16, fontWeight: '800' },
-  input: { fontSize: 16, borderBottomWidth: 1, paddingVertical: 9 },
-  categoryPicker: { flexDirection: 'row', gap: 8 },
-  categoryOption: { flex: 1, minHeight: 62, borderWidth: 1, borderRadius: 8, alignItems: 'center', justifyContent: 'center', gap: 6 },
-  tagBank: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  tagChip: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7 },
-  saveBtn: { height: 50, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginTop: 24 },
+  categoryPicker: { flexDirection: 'row', gap: space.sm },
+  categoryOption: { flex: 1, minHeight: 62, borderWidth: 1, borderRadius: radius.sharp, alignItems: 'center', justifyContent: 'center', gap: space.xs },
+  tagBank: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  templateRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: radius.sharp, padding: space.md },
 });

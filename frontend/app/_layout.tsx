@@ -4,6 +4,18 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useFonts } from 'expo-font';
+import {
+  DMSans_700Bold,
+} from '@expo-google-fonts/dm-sans';
+import {
+  DMMono_400Regular,
+  DMMono_500Medium,
+} from '@expo-google-fonts/dm-mono';
+import {
+  Inter_400Regular,
+  Inter_500Medium,
+  Inter_600SemiBold,
+} from '@expo-google-fonts/inter';
 import { Ionicons } from '@expo/vector-icons';
 import { ThemeProvider, useTheme } from '../src/theme/ThemeProvider';
 import { useStore } from '../src/lib/store';
@@ -18,9 +30,19 @@ function RootGate() {
   const hydrated = useStore((s) => s.hydrated);
   const user = useStore((s) => s.user);
   const onboarded = useStore((s) => s.onboarded);
+  const capsuleOffered = useStore((s) => s.capsuleOffered);
   const trips = useStore((s) => s.trips);
+  const wardrobe = useStore((s) => s.wardrobe);
   const hydrate = useStore((s) => s.hydrate);
-  const [fontsLoaded] = useFonts({ ...Ionicons.font });
+  const [fontsLoaded] = useFonts({
+    ...Ionicons.font,
+    DMSans_700Bold,
+    DMMono_400Regular,
+    DMMono_500Medium,
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_600SemiBold,
+  });
 
   useEffect(() => {
     installMonitoring();
@@ -47,8 +69,32 @@ function RootGate() {
       if (segments[0] !== 'onboarding') router.replace('/onboarding/trip-create');
       return;
     }
-    if (!inTabs && !inTemplates && !['settings', 'outfits'].includes(String(segments[0]))) router.replace('/(tabs)');
-  }, [rootNavigationState?.key, hydrated, fontsLoaded, user, onboarded, trips.length, segments, router]);
+    // First trip exists but wardrobe is still empty — offer a capsule once
+    // instead of dropping the user straight into a blank studio (design
+    // brief: "guided first-run... at the empty-dashboard moment").
+    if (!capsuleOffered && wardrobe.length === 0) {
+      if (segments[0] !== 'onboarding') router.replace('/onboarding/capsule');
+      return;
+    }
+    if (
+      !inTabs &&
+      !inTemplates &&
+      !['settings', 'outfits', 'style-it'].includes(String(segments[0]))
+    ) {
+      router.replace('/(tabs)');
+    }
+  }, [
+    rootNavigationState?.key,
+    hydrated,
+    fontsLoaded,
+    user,
+    onboarded,
+    capsuleOffered,
+    trips.length,
+    wardrobe.length,
+    segments,
+    router,
+  ]);
 
   return (
     <>
@@ -59,6 +105,7 @@ function RootGate() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="templates" />
         <Stack.Screen name="outfits" />
+        <Stack.Screen name="style-it" options={{ presentation: 'modal' }} />
         <Stack.Screen name="settings" options={{ presentation: 'modal' }} />
       </Stack>
       {(!hydrated || !fontsLoaded) && (

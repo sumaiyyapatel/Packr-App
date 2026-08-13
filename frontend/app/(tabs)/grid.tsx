@@ -22,6 +22,8 @@ import Animated, {
   runOnJS,
 } from 'react-native-reanimated';
 import { useTheme } from '../../src/theme/ThemeProvider';
+import { type as t, space, radius } from '../../src/theme/tokens';
+import { ScreenHeader, IconButton } from '../../src/components/ui';
 import { useStore } from '../../src/lib/store';
 import { getApiErrorMessage, resolveApiAssetUrl, WardrobeItem } from '../../src/lib/api';
 import { captureRef } from 'react-native-view-shot';
@@ -219,16 +221,12 @@ export default function GridScreen() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
       <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 48 }}>
-        <View style={styles.headerRow}>
-          <View>
-            <Text style={[styles.kicker, { color: c.accent }]}>THE GRID</Text>
-            <Text style={[styles.h1, { color: c.textPrimary }]}>Tap or drag</Text>
-          </View>
-          {saving && <ActivityIndicator color={c.accent} />}
-        </View>
-        <Text style={{ color: c.textTertiary, fontSize: 12, marginTop: 4 }}>
-          {trip.destination}
-        </Text>
+        <ScreenHeader
+          kicker="THE GRID"
+          title="Tap or drag"
+          subtitle={trip.destination}
+          right={saving ? <ActivityIndicator color={c.accent} /> : undefined}
+        />
 
         <Text style={[styles.layoutHint, { color: c.textTertiary }]}>
           ROTATING SUDOKU LAYOUT
@@ -264,23 +262,22 @@ export default function GridScreen() {
                           : isValidDragTarget
                           ? c.accent
                           : item
-                          ? slotMeta.color
-                          : slotMeta.color + '88',
+                          ? c.borderActive
+                          : c.borderSubtle,
                         borderWidth: isValidDragTarget ? 2 : 1,
                         backgroundColor: conflict
                           ? c.warning + '22'
                           : isValidDragTarget
-                          ? c.accent + '18'
+                          ? c.accentSoft
                           : item
-                          ? slotMeta.soft
-                          : c.surface,
+                          ? c.plate
+                          : 'transparent',
                         borderStyle: item ? 'solid' : 'dashed',
                         opacity: isGuidingDrag && !isValidDragTarget ? 0.3 : 1,
                         transform: [{ scale: isValidDragTarget ? 1.02 : 1 }],
                       },
                     ]}
                   >
-                    <View style={[styles.slotAccent, { backgroundColor: slotMeta.color }]} />
                     {item ? (
                       item.image ? (
                         <Image
@@ -290,21 +287,23 @@ export default function GridScreen() {
                         />
                       ) : (
                         <View style={{ alignItems: 'center', padding: 4 }}>
-                          <Ionicons name={slotMeta.icon as keyof typeof Ionicons.glyphMap} size={20} color={slotMeta.color} />
-                          <Text numberOfLines={1} style={{ color: c.textPrimary, fontSize: 10, marginTop: 2 }}>
+                          <Ionicons name={slotMeta.icon as keyof typeof Ionicons.glyphMap} size={20} color={c.textTertiary} />
+                          <Text numberOfLines={1} style={[t.micro, { color: c.textPrimary, marginTop: 2 }]}>
                             {item.name}
                           </Text>
                         </View>
                       )
                     ) : (
-                      <View style={{ alignItems: 'center' }}>
-                        <Text style={[styles.slotIdx, { color: c.textTertiary }]}>{i + 1}</Text>
-                        <Text style={[styles.slotCat, { color: slotMeta.color }]}>{slotMeta.short}</Text>
+                      <View style={{ alignItems: 'center', gap: 2 }}>
+                        <Text style={[t.label, { color: c.textTertiary }]}>{slotMeta.short}</Text>
+                        <Text style={[t.h2, { color: c.borderActive }]}>+</Text>
                       </View>
                     )}
-                    <View style={[styles.slotBadge, { backgroundColor: c.bg, borderColor: slotMeta.color }]}>
-                      <Text style={[styles.slotBadgeText, { color: slotMeta.color }]}>{slotMeta.short}</Text>
-                    </View>
+                    {item ? (
+                      <View style={[styles.slotBadge, { backgroundColor: c.bg, borderColor: c.borderSubtle }]}>
+                        <Text style={[styles.slotBadgeText, { color: c.textTertiary }]}>{slotMeta.short}</Text>
+                      </View>
+                    ) : null}
                   </Pressable>
                 );
               })}
@@ -315,22 +314,22 @@ export default function GridScreen() {
         {conflicts.hasConflicts && (
           <View style={[styles.conflictBox, { borderColor: c.warning, backgroundColor: c.warning + '15' }]}>
             <Ionicons name="warning-outline" size={16} color={c.warning} />
-            <Text style={{ color: c.warning, marginLeft: 6, flex: 1, fontSize: 12 }}>
+            <Text style={[t.micro, { color: c.warning, marginLeft: 6, flex: 1 }]}>
               {Object.values(conflicts.slotConflicts)[0]}
             </Text>
           </View>
         )}
 
         {completeMoment && !conflicts.hasConflicts && (
-          <View style={[styles.completeBox, { borderColor: c.accent, backgroundColor: c.accent + '18' }]}>
+          <View style={[styles.completeBox, { borderColor: c.accent, backgroundColor: c.accentSoft }]}>
             <View style={styles.completeDots}>
               {[0, 1, 2, 3, 4].map((dot) => (
                 <View key={dot} style={[styles.completeDot, { backgroundColor: c.accent, opacity: 1 - dot * 0.12 }]} />
               ))}
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={{ color: c.textPrimary, fontSize: 14, fontWeight: '900' }}>Grid complete</Text>
-              <Text style={{ color: c.textSecondary, fontSize: 12, marginTop: 2 }}>
+              <Text style={[t.title, { color: c.textPrimary }]}>Grid complete</Text>
+              <Text style={[t.micro, { color: c.textSecondary, marginTop: 2 }]}>
                 9 items can now make 27 outfits.
               </Text>
             </View>
@@ -346,19 +345,19 @@ export default function GridScreen() {
             style={[styles.shareBtn, { borderColor: c.accent, opacity: sharing ? 0.6 : 1 }]}
           >
             {sharing ? (
-              <ActivityIndicator color={c.accent} size="small" />
+              <ActivityIndicator color={c.accentText} size="small" />
             ) : (
-              <Ionicons name="share-social-outline" size={16} color={c.accent} />
+              <Ionicons name="share-social-outline" size={16} color={c.accentText} />
             )}
-            <Text style={{ color: c.accent, fontWeight: '800', fontSize: 13, marginLeft: 8 }}>
+            <Text style={[t.label, { color: c.accentText, marginLeft: 8 }]}>
               SHARE GRID (INSTAGRAM & MORE)
             </Text>
           </Pressable>
         )}
 
         <View style={{ height: 16 }} />
-        <Text style={[styles.section, { color: c.textPrimary }]}>WARDROBE - TAP OR DRAG</Text>
-        <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 4 }}>
+        <Text style={[t.kicker, { color: c.textPrimary }]}>WARDROBE - TAP OR DRAG</Text>
+        <Text style={[t.micro, { color: c.textTertiary, marginTop: 4 }]}>
           Tap an empty slot to pick a matching item. Long-press an item to drag it.
         </Text>
 
@@ -370,7 +369,7 @@ export default function GridScreen() {
         >
           {wardrobe.length === 0 && (
             <View style={[styles.itemEmpty, { borderColor: c.borderSubtle }]}>
-              <Text style={{ color: c.textTertiary, fontSize: 12, textAlign: 'center' }}>
+              <Text style={[t.micro, { color: c.textTertiary, textAlign: 'center' }]}>
                 Add items in Studio first.
               </Text>
             </View>
@@ -403,8 +402,8 @@ export default function GridScreen() {
         >
           <Text
             style={[
-              styles.ctaText,
-              { color: complete && !conflicts.hasConflicts ? c.bg : c.textTertiary },
+              t.kicker,
+              { color: complete && !conflicts.hasConflicts ? c.accentInk : c.textTertiary, letterSpacing: 2 },
             ]}
           >
             {complete ? 'GENERATE 27 OUTFITS' : `GRID ${filled}/9`}
@@ -450,16 +449,14 @@ function SlotPickerModal({
         <View style={[styles.pickerSheet, { backgroundColor: c.surface, borderColor: c.borderSubtle }]}>
           <View style={styles.pickerHeader}>
             <View>
-              <Text style={[styles.kicker, { color: meta.color }]}>SLOT {slot + 1}</Text>
-              <Text style={{ color: c.textPrimary, fontSize: 22, fontWeight: '800' }}>Choose {category}</Text>
+              <Text style={[t.kicker, { color: c.accentText }]}>SLOT {slot + 1}</Text>
+              <Text style={[t.h1, { color: c.textPrimary }]}>Choose {category}</Text>
             </View>
-            <Pressable onPress={onClose} style={[styles.closeBtn, { borderColor: c.borderSubtle }]}>
-              <Ionicons name="close" size={18} color={c.textPrimary} />
-            </Pressable>
+            <IconButton icon="close" accessibilityLabel="Close" onPress={onClose} />
           </View>
-          <ScrollView contentContainerStyle={{ gap: 10, paddingTop: 16 }}>
+          <ScrollView contentContainerStyle={{ gap: space.sm, paddingTop: space.lg }}>
             {choices.length === 0 ? (
-              <Text style={{ color: c.textSecondary }}>Add a {category} in Studio first.</Text>
+              <Text style={[t.body, { color: c.textSecondary }]}>Add a {category} in Studio first.</Text>
             ) : (
               choices.map((item) => {
                 const used = inGrid.includes(item.id);
@@ -467,20 +464,20 @@ function SlotPickerModal({
                   <Pressable
                     key={item.id}
                     onPress={() => onPick(slot, item)}
-                    style={[styles.pickRow, { borderColor: used ? c.borderSubtle : meta.color, backgroundColor: c.elevated }]}
+                    style={[styles.pickRow, { borderColor: used ? c.borderSubtle : c.borderActive, backgroundColor: c.elevated }]}
                   >
                     {item.image ? (
                       <Image source={{ uri: resolveApiAssetUrl(item.image) }} style={styles.pickImage} contentFit="contain" />
                     ) : (
-                      <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={24} color={meta.color} />
+                      <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={24} color={c.textTertiary} />
                     )}
                     <View style={{ flex: 1 }}>
-                      <Text style={{ color: c.textPrimary, fontSize: 15, fontWeight: '800' }}>{item.name}</Text>
-                      <Text style={{ color: c.textTertiary, fontSize: 11, marginTop: 2 }}>
+                      <Text style={[t.title, { color: c.textPrimary }]}>{item.name}</Text>
+                      <Text style={[t.micro, { color: c.textTertiary, marginTop: 2 }]}>
                         {used ? 'Currently in grid - will move here' : `${Number(item.weight_kg || 0).toFixed(1)}kg`}
                       </Text>
                     </View>
-                    <Ionicons name="add-circle-outline" size={20} color={meta.color} />
+                    <Ionicons name="add-circle-outline" size={20} color={c.accent} />
                   </Pressable>
                 );
               })
@@ -560,12 +557,12 @@ function DraggableItem({
             width: 90,
             height: 110,
             borderWidth: 1,
-            borderRadius: 6,
-            padding: 8,
+            borderRadius: radius.sharp,
+            padding: space.sm,
             alignItems: 'center',
             justifyContent: 'center',
-            borderColor: isDragging ? meta.color : inGrid ? c.borderSubtle : meta.color,
-            backgroundColor: inGrid && !isDragging ? c.surface : meta.soft,
+            borderColor: isDragging ? c.accent : c.borderActive,
+            backgroundColor: inGrid && !isDragging ? c.surface : c.plate,
             opacity: inGrid && !isDragging ? 0.4 : 1,
           },
           animStyle,
@@ -578,12 +575,12 @@ function DraggableItem({
             contentFit="contain"
           />
         ) : (
-          <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={24} color={meta.color} />
+          <Ionicons name={meta.icon as keyof typeof Ionicons.glyphMap} size={24} color={c.textTertiary} />
         )}
-        <Text numberOfLines={1} style={{ color: c.textPrimary, fontSize: 11, marginTop: 4 }}>
+        <Text numberOfLines={1} style={[t.micro, { color: c.textPrimary, marginTop: 4 }]}>
           {item.name}
         </Text>
-        <Text style={{ color: meta.color, fontSize: 9, letterSpacing: 1, fontWeight: '800' }}>
+        <Text style={[t.kicker, { color: c.textTertiary, fontSize: 9 }]}>
           {meta.short}
         </Text>
       </Animated.View>
@@ -592,63 +589,54 @@ function DraggableItem({
 }
 
 const styles = StyleSheet.create({
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
-  h1: { fontSize: 32, fontWeight: '700', letterSpacing: -1, marginTop: 4 },
-  layoutHint: { fontSize: 10, letterSpacing: 2, fontWeight: '600', marginTop: 24, marginBottom: 8 },
+  layoutHint: { fontSize: 10, letterSpacing: 2, fontWeight: '600', marginTop: space.xl, marginBottom: space.sm },
   grid: {
-    aspectRatio: 1, borderWidth: 1, borderRadius: 8, padding: 8,
-    flexDirection: 'column', gap: 8,
+    aspectRatio: 1, borderWidth: 1, borderRadius: radius.sharp, padding: space.sm,
+    flexDirection: 'column', gap: space.sm,
   },
-  gridRow: { flex: 1, flexDirection: 'row', gap: 8 },
+  gridRow: { flex: 1, flexDirection: 'row', gap: space.sm },
   slot: {
-    flex: 1, borderWidth: 1, borderRadius: 6,
+    flex: 1, borderWidth: 1, borderRadius: radius.sharp,
     alignItems: 'center', justifyContent: 'center', overflow: 'hidden', position: 'relative',
   },
-  slotAccent: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, zIndex: 3 },
   slotImg: { width: '100%', height: '100%' },
-  slotIdx: { fontSize: 18, fontWeight: '700' },
-  slotCat: { fontSize: 9, letterSpacing: 1, marginTop: 2, fontWeight: '800' },
   slotBadge: {
     position: 'absolute', right: 4, bottom: 4, borderWidth: 1,
-    borderRadius: 4, paddingHorizontal: 4, paddingVertical: 2,
+    borderRadius: radius.sharp, paddingHorizontal: 4, paddingVertical: 2,
   },
   slotBadgeText: { fontSize: 7, letterSpacing: 0.8, fontWeight: '900' },
   conflictBox: {
-    flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: 6,
-    padding: 10, marginTop: 12,
+    flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: radius.sharp,
+    padding: space.sm, marginTop: space.md,
   },
   completeBox: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 12,
+    flexDirection: 'row', alignItems: 'center', gap: space.md,
+    borderWidth: 1, borderRadius: radius.sharp, padding: space.md, marginTop: space.md,
   },
   completeDots: { flexDirection: 'row', gap: 4 },
   shareBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderRadius: 8, paddingVertical: 12, marginTop: 12,
+    borderWidth: 1, borderRadius: radius.sharp, paddingVertical: space.md, marginTop: space.md,
   },
   completeDot: { width: 7, height: 7, borderRadius: 4 },
-  section: { fontSize: 11, letterSpacing: 2, fontWeight: '600', marginTop: 16 },
   itemEmpty: {
-    width: 240, height: 110, borderWidth: 1, borderRadius: 6,
-    alignItems: 'center', justifyContent: 'center', borderStyle: 'dashed', padding: 16,
+    width: 240, height: 110, borderWidth: 1, borderRadius: radius.sharp,
+    alignItems: 'center', justifyContent: 'center', borderStyle: 'dashed', padding: space.lg,
   },
-  dragImage: { width: 58, height: 58, borderRadius: 4 },
-  cta: { paddingVertical: 16, borderWidth: 1, borderRadius: 4, alignItems: 'center' },
-  ctaText: { fontSize: 13, letterSpacing: 2, fontWeight: '600' },
+  dragImage: { width: 58, height: 58, borderRadius: radius.sharp },
+  cta: { paddingVertical: space.lg, borderWidth: 1, borderRadius: radius.sharp, alignItems: 'center' },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
   modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.62)' },
   pickerSheet: {
     maxHeight: '78%',
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
+    borderTopLeftRadius: radius.sheet,
+    borderTopRightRadius: radius.sheet,
     borderWidth: 1,
     borderBottomWidth: 0,
-    padding: 20,
+    padding: space.xl,
     paddingBottom: 34,
   },
-  pickerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  closeBtn: { width: 38, height: 38, borderRadius: 8, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  pickRow: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderRadius: 8, padding: 10 },
-  pickImage: { width: 54, height: 54, borderRadius: 6 },
+  pickerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space.md },
+  pickRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, borderWidth: 1, borderRadius: radius.sharp, padding: space.sm },
+  pickImage: { width: 54, height: 54, borderRadius: radius.sharp },
 });

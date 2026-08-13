@@ -22,7 +22,7 @@ export default function ProScreen() {
       </View>
 
       <View style={styles.body}>
-        <Text style={[styles.kicker, { color: c.accent }]}>SUBSCRIPTIONS</Text>
+        <Text style={[styles.kicker, { color: c.accentText }]}>SUBSCRIPTIONS</Text>
         <Text style={[styles.h1, { color: c.textPrimary }]}>Not available in this release</Text>
         <Text style={[styles.copy, { color: c.textSecondary }]}>
           Packr public launch does not include paid plans. All core trip, wardrobe, grid, packing,

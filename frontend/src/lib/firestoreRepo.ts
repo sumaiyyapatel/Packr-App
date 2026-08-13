@@ -26,11 +26,16 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
   writeBatch,
   Timestamp,
+  type QuerySnapshot,
+  type DocumentData,
 } from 'firebase/firestore';
 import { getDb } from './firebase';
 import type { Template, Trip, User, WardrobeItem } from './api';
+import { deletePost } from './communityRepo';
+import { deleteImageByUrl } from './storage';
 
 // ---------- shared helpers ----------
 
@@ -90,6 +95,14 @@ export async function ensureUserDoc(params: {
   }
   const data = snapshot.data();
   return { ...data, created_at: toIso(data.created_at) } as User;
+}
+
+export async function updateAirlineProfiles(
+  uid: string,
+  profiles: User['airline_profiles']
+): Promise<void> {
+  if (!profiles.length) throw new Error('Keep at least one airline profile');
+  await updateDoc(doc(getDb(), 'users', uid), { airline_profiles: profiles });
 }
 
 // ---------- wardrobe ----------
@@ -401,17 +414,38 @@ export async function createReflection(
   });
 }
 
-export async function listReflectedTripIds(uid: string, trips: Trip[]): Promise<Set<string>> {
-  const today = new Date().toISOString().slice(0, 10);
+export type ReflectionRecord = { worn_outfit_keys: string[]; unused_item_ids: string[] };
+
+/**
+ * Fetches every reflection doc for each past trip in one pass — the reflected
+ * id set (used to decide whether to show the "reflect on this trip" nudge)
+ * and the raw records (used to compute wear-count insights) come from the
+ * same reads instead of two separate round-trips.
+ */
+export async function listPastTripReflections(
+  uid: string,
+  trips: Trip[]
+): Promise<{ reflectedTripIds: Set<string>; byTripId: Record<string, ReflectionRecord[]> }> {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   const past = trips.filter((trip) => trip.end_date < today);
-  const reflected = new Set<string>();
+  const reflectedTripIds = new Set<string>();
+  const byTripId: Record<string, ReflectionRecord[]> = {};
   await Promise.all(
     past.map(async (trip) => {
       const snapshot = await getDocs(collection(getDb(), 'users', uid, 'trips', trip.id, 'reflections'));
-      if (!snapshot.empty) reflected.add(trip.id);
+      if (snapshot.empty) return;
+      reflectedTripIds.add(trip.id);
+      byTripId[trip.id] = snapshot.docs.map((d) => {
+        const data = d.data();
+        return {
+          worn_outfit_keys: Array.isArray(data.worn_outfit_keys) ? data.worn_outfit_keys : [],
+          unused_item_ids: Array.isArray(data.unused_item_ids) ? data.unused_item_ids : [],
+        };
+      });
     })
   );
-  return reflected;
+  return { reflectedTripIds, byTripId };
 }
 
 // ---------- templates (apply backend/community template into Firestore) ----------
@@ -513,9 +547,16 @@ export async function publishTemplate(
   data: Omit<Template, 'id' | 'author_id' | 'author_name' | 'is_official' | 'likes' | 'created_at'>
 ): Promise<Template> {
   if (data.items.length !== 9) throw new Error('Template must include exactly 9 items');
+  // Strip inline base64 images: 9 photos would blow past Firestore's 1 MB
+  // document limit. Applied templates render category placeholders instead.
+  const items = data.items.map((item) => ({
+    ...item,
+    image: item.image && !item.image.startsWith('data:') ? item.image : '',
+  }));
   const id = newId();
   const docData = {
     ...data,
+    items,
     author_id: uid,
     author_name: 'anonymous',
     is_official: false,
@@ -545,6 +586,40 @@ export async function setTemplateLike(uid: string, templateId: string, liked: bo
       tx.update(templateRef, { likes: increment(-1) });
     }
   });
+}
+
+// ---------- private templates (repack: "save this grid for next time") ----------
+// Owner-only, under users/{uid}/private_templates — unlike the public
+// `templates` collection these never need a visibility field or a
+// community-facing rule: `users/{uid}` is already locked to isOwner(uid).
+
+export type PrivateTemplateItem = { name?: string; category?: string; image?: string; colors?: string[]; tags?: string[] };
+export type PrivateTemplate = { id: string; name: string; items: PrivateTemplateItem[]; created_at: string };
+
+export async function savePrivateTemplate(
+  uid: string,
+  name: string,
+  items: PrivateTemplateItem[]
+): Promise<PrivateTemplate> {
+  if (items.length !== 9) throw new Error('Template must include exactly 9 items');
+  const id = newId();
+  const docData = { name: name.trim().slice(0, 80) || 'My template', items, created_at: serverTimestamp() };
+  await setDoc(doc(getDb(), 'users', uid, 'private_templates', id), docData);
+  return { ...docData, id, created_at: new Date().toISOString() };
+}
+
+export async function listPrivateTemplates(uid: string): Promise<PrivateTemplate[]> {
+  const snapshot = await getDocs(
+    query(collection(getDb(), 'users', uid, 'private_templates'), orderBy('created_at', 'desc'))
+  );
+  return snapshot.docs.map((d) => {
+    const data = d.data();
+    return { id: d.id, name: String(data.name || 'My template'), items: data.items || [], created_at: toIso(data.created_at) };
+  });
+}
+
+export async function deletePrivateTemplate(uid: string, id: string): Promise<void> {
+  await deleteDoc(doc(getDb(), 'users', uid, 'private_templates', id));
 }
 
 // ---------- grid/outfit state cleanup (ported from server.py) ----------
@@ -591,4 +666,69 @@ function cleanChecklistStateForGrid(trip: Trip, grid: (string | null)[]) {
     cleaned[key] = Boolean(value);
   }
   return cleaned;
+}
+
+// ---------- account deletion ----------
+// Client-side wipe (no Admin SDK on Spark). Covers everything the user owns:
+// wardrobe (+ uploaded photos), trips (+ reflections), saved-post pointers,
+// authored templates (+ their like docs), authored posts (via communityRepo's
+// deletePost, which already cleans its own subcollections), and follow edges
+// in both directions. Does NOT reconcile like/save/comment docs the user left
+// on OTHER people's posts/templates — Firestore has no cheap way to query
+// "all subcollection docs across every parent with id == uid" from the client.
+// Those are inert foreign-key artifacts (a uid with no profile), not PII;
+// a full sweep would need a Cloud Function. Call this before deleting the
+// Firebase Auth user — every write here depends on `request.auth.uid == uid`.
+
+async function deleteDocsIn(snapshot: QuerySnapshot<DocumentData>): Promise<void> {
+  if (snapshot.empty) return;
+  const db = getDb();
+  const docs = snapshot.docs;
+  for (let i = 0; i < docs.length; i += 400) {
+    const batch = writeBatch(db);
+    docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+  }
+}
+
+export async function wipeAllUserData(uid: string): Promise<void> {
+  const db = getDb();
+
+  // Wardrobe: best-effort delete each uploaded photo, then the docs.
+  const wardrobeSnap = await getDocs(collection(db, 'users', uid, 'wardrobe'));
+  await Promise.all(
+    wardrobeSnap.docs.map((d) => deleteImageByUrl(String(d.data().image || '')))
+  );
+  await deleteDocsIn(wardrobeSnap);
+
+  // Trips: each trip's reflections subcollection, then the trip doc.
+  const tripsSnap = await getDocs(collection(db, 'users', uid, 'trips'));
+  for (const tripDoc of tripsSnap.docs) {
+    await deleteDocsIn(await getDocs(collection(db, 'users', uid, 'trips', tripDoc.id, 'reflections')));
+  }
+  await deleteDocsIn(tripsSnap);
+
+  // Saved-post pointers.
+  await deleteDocsIn(await getDocs(collection(db, 'users', uid, 'saved_posts')));
+
+  // Authored community posts — reuse deletePost so subcollection cleanup
+  // (likes/saves/comments/reports) stays in one place.
+  const postsSnap = await getDocs(query(collection(db, 'posts'), where('author_id', '==', uid)));
+  for (const postDoc of postsSnap.docs) {
+    await deletePost(uid, postDoc.id);
+  }
+
+  // Authored templates — delete their like docs, then the template.
+  const templatesSnap = await getDocs(query(collection(db, 'templates'), where('author_id', '==', uid)));
+  for (const templateDoc of templatesSnap.docs) {
+    await deleteDocsIn(await getDocs(collection(db, 'templates', templateDoc.id, 'likes')));
+    await deleteDoc(templateDoc.ref);
+  }
+
+  // Follow edges in both directions.
+  await deleteDocsIn(await getDocs(query(collection(db, 'follows'), where('follower_id', '==', uid))));
+  await deleteDocsIn(await getDocs(query(collection(db, 'follows'), where('following_id', '==', uid))));
+
+  // Profile doc last.
+  await deleteDoc(doc(db, 'users', uid));
 }

@@ -1,23 +1,35 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   Pressable,
-  TextInput,
   Modal,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useTheme } from '../../src/theme/ThemeProvider';
+import { type as t, space, radius } from '../../src/theme/tokens';
+import { ScreenHeader, Chip, TextField, Button, ProgressRing, ActionBar } from '../../src/components/ui';
 import { useStore } from '../../src/lib/store';
-import { api, WardrobeItem, Trip } from '../../src/lib/api';
+import { WardrobeItem } from '../../src/lib/api';
 import { trackEvent } from '../../src/lib/analytics';
+
+function todayIso(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function daysFromToday(dateIso: string): number {
+  const target = new Date(`${dateIso}T00:00:00`).getTime();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((target - today.getTime()) / 86_400_000);
+}
 
 const ESSENTIAL_DEFAULTS: { key: string; name: string; weight: number; category: string }[] = [
   { key: 'passport', name: 'Passport', weight: 0.05, category: 'documents' },
@@ -120,6 +132,56 @@ export default function Checklist() {
     }
   }, [checkedCount, totalCount, totalWeight, trip?.id]);
 
+  // "11 · Packing day" — same screen, reframed as the trip gets close:
+  // within 2 days of departure (through the trip itself) and still
+  // unfinished, the header/copy switches to the packing-day framing and a
+  // bulk "mark all packed" action appears.
+  const daysUntilStart = trip ? daysFromToday(trip.start_date) : null;
+  const tripInProgressOrSoon =
+    trip != null && daysUntilStart != null && daysUntilStart <= 2 && trip.end_date >= todayIso();
+  const isPackingDay = tripInProgressOrSoon && totalCount > 0 && checkedCount < totalCount;
+
+  const notifiedTripsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!trip || !isPackingDay || notifiedTripsRef.current.has(trip.id)) return;
+    (async () => {
+      try {
+        const Notifications = await import('expo-notifications').catch(() => null);
+        if (!Notifications || typeof Notifications.scheduleNotificationAsync !== 'function') return;
+        let perms = await Notifications.getPermissionsAsync();
+        if (perms.status !== 'granted') perms = await Notifications.requestPermissionsAsync();
+        if (perms.status !== 'granted') return;
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: `Packing day for ${trip.destination}`,
+            body: `${totalCount - checkedCount} item${totalCount - checkedCount === 1 ? '' : 's'} still unchecked. Finish before you go.`,
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            seconds: 60 * 60 * 12,
+            repeats: false,
+          },
+        });
+        notifiedTripsRef.current.add(trip.id);
+      } catch {
+        // expo-notifications not installed yet (run `npx expo install
+        // expo-notifications`), or the platform doesn't support it — no-op.
+      }
+    })();
+  }, [trip, isPackingDay, totalCount, checkedCount]);
+
+  const markAllPacked = () => {
+    if (!trip) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    const keys = [
+      ...gridItems.map(({ id }) => `grid:${id}`),
+      ...allEssentials.map((e) => e.key),
+    ];
+    for (const key of keys) {
+      if (!trip.checklist_state[key]) toggleChecklistOptimistic(trip.id, key);
+    }
+  };
+
   if (!trip) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
@@ -133,12 +195,23 @@ export default function Checklist() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
       <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 96 }}>
-        <Text style={[styles.kicker, { color: c.accent }]}>PACK</Text>
-        <Text style={[styles.h1, { color: c.textPrimary }]}>Final check</Text>
-        <Text style={{ color: c.textTertiary, fontSize: 12, marginTop: 4 }}>{trip.destination}</Text>
+        <ScreenHeader
+          kicker={isPackingDay ? `PACKING DAY · ${trip.destination.toUpperCase()}` : 'PACK'}
+          title={isPackingDay ? 'Ready to pack?' : 'Final check'}
+          subtitle={isPackingDay ? `${checkedCount} of ${totalCount} packed` : trip.destination}
+        />
+
+        <View style={{ alignItems: 'center', marginTop: space.xl }}>
+          <ProgressRing progress={totalCount ? checkedCount / totalCount : 0} size={128} strokeWidth={10}>
+            <Text style={[t.display, { color: c.textPrimary }]}>
+              {totalCount ? Math.round((checkedCount / totalCount) * 100) : 0}%
+            </Text>
+            <Text style={[t.kicker, { color: c.textTertiary }]}>PACKED</Text>
+          </ProgressRing>
+        </View>
 
         {/* Airline picker */}
-        <Text style={[styles.section, { color: c.textPrimary, marginTop: 24 }]}>AIRLINE</Text>
+        <Text style={[t.kicker, { color: c.textPrimary, marginTop: space.xl }]}>AIRLINE</Text>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -160,10 +233,10 @@ export default function Checklist() {
                   },
                 ]}
               >
-                <Text style={{ color: isActive ? c.bg : c.textPrimary, fontSize: 12, fontWeight: '600' }}>
+                <Text style={[t.label, { color: isActive ? c.accentInk : c.textPrimary }]}>
                   {a.name}
                 </Text>
-                <Text style={{ color: isActive ? c.bg : c.textTertiary, fontSize: 10, marginTop: 2 }}>
+                <Text style={[t.micro, { color: isActive ? c.accentInk : c.textTertiary, marginTop: 2 }]}>
                   {a.max_kg.toFixed(1)} kg
                 </Text>
               </Pressable>
@@ -171,70 +244,16 @@ export default function Checklist() {
           })}
         </ScrollView>
 
-        {/* Grid items section */}
+        {/* Essentials first — small, easy-to-forget items travelers check first. */}
         <View style={styles.sectionRow}>
-          <Text style={[styles.section, { color: c.textPrimary }]}>
-            THE GRID ({gridItems.length}/9)
-          </Text>
-        </View>
-
-        <View style={[styles.progressPanel, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
-          {categoryProgress.map((item) => (
-            <View key={item.category} style={styles.progressLine}>
-              <Text style={{ color: c.textSecondary, fontSize: 11, fontWeight: '800', width: 70 }}>
-                {item.category.toUpperCase()}
-              </Text>
-              <View style={[styles.progressTrack, { backgroundColor: c.elevated }]}>
-                <View
-                  style={[
-                    styles.progressFill,
-                    {
-                      backgroundColor: c.accent,
-                      width: `${item.total ? (item.done / item.total) * 100 : 0}%`,
-                    },
-                  ]}
-                />
-              </View>
-              <Text style={{ color: c.textTertiary, fontSize: 11, width: 34, textAlign: 'right' }}>
-                {item.done}/{item.total}
-              </Text>
-            </View>
-          ))}
-        </View>
-
-        <View style={[styles.box, { borderColor: c.borderSubtle }]}>
-          {gridItems.length === 0 && (
-            <Text style={{ color: c.textTertiary, padding: 16 }}>Build the grid first.</Text>
-          )}
-          {gridItems.map(({ id, i }) => {
-            const item = itemsById[id];
-            if (!item) return null;
-            const key = `grid:${id}`;
-            const legacyKey = `grid:${i}`;
-            const checked = !!(trip.checklist_state[key] || trip.checklist_state[legacyKey]);
-            return (
-              <CheckRow
-                key={key}
-                testID={`check-grid-${i}`}
-                checked={checked}
-                onToggle={() => onToggle(key)}
-                title={item.name}
-                subtitle={`${item.category.toUpperCase()} · slot ${i + 1}`}
-                weight={item.weight_kg}
-              />
-            );
-          })}
-        </View>
-
-        <View style={styles.sectionRow}>
-          <Text style={[styles.section, { color: c.textPrimary }]}>ESSENTIALS</Text>
+          <Text style={[t.kicker, { color: c.textPrimary }]}>ESSENTIALS</Text>
           <Pressable
             testID="add-extra-button"
             onPress={() => setShowAdd(true)}
             style={[styles.smallBtn, { borderColor: c.borderActive }]}
           >
             <Ionicons name="add" size={14} color={c.textPrimary} />
-            <Text style={{ color: c.textPrimary, fontSize: 11, letterSpacing: 1, fontWeight: '600' }}>
+            <Text style={[t.kicker, { color: c.textPrimary, fontSize: 11 }]}>
               ADD
             </Text>
           </Pressable>
@@ -258,12 +277,73 @@ export default function Checklist() {
           })}
         </View>
 
+        {/* Grid items section */}
+        <View style={styles.sectionRow}>
+          <Text style={[t.kicker, { color: c.textPrimary }]}>
+            THE GRID ({gridItems.length}/9)
+          </Text>
+        </View>
+
+        <View style={[styles.progressPanel, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
+          {categoryProgress.map((item) => (
+            <View key={item.category} style={styles.progressLine}>
+              <Text style={[t.label, { color: c.textSecondary, width: 70 }]}>
+                {item.category.toUpperCase()}
+              </Text>
+              <View style={[styles.progressTrack, { backgroundColor: c.elevated }]}>
+                <View
+                  style={[
+                    styles.progressFill,
+                    {
+                      backgroundColor: c.accent,
+                      width: `${item.total ? (item.done / item.total) * 100 : 0}%`,
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={[t.micro, { color: c.textTertiary, width: 34, textAlign: 'right' }]}>
+                {item.done}/{item.total}
+              </Text>
+            </View>
+          ))}
+        </View>
+
+        <View style={[styles.box, { borderColor: c.borderSubtle }]}>
+          {gridItems.length === 0 && (
+            <Text style={[t.body, { color: c.textTertiary, padding: space.lg }]}>Build the grid first.</Text>
+          )}
+          {gridItems.map(({ id, i }) => {
+            const item = itemsById[id];
+            if (!item) return null;
+            const key = `grid:${id}`;
+            const legacyKey = `grid:${i}`;
+            const checked = !!(trip.checklist_state[key] || trip.checklist_state[legacyKey]);
+            return (
+              <CheckRow
+                key={key}
+                testID={`check-grid-${i}`}
+                checked={checked}
+                onToggle={() => onToggle(key)}
+                title={item.name}
+                subtitle={`${item.category.toUpperCase()} · slot ${i + 1}`}
+                weight={item.weight_kg}
+              />
+            );
+          })}
+        </View>
+
         {overLimit && (
           <View style={[styles.limitWarning, { borderColor: c.error, backgroundColor: c.error + '12' }]}>
             <Ionicons name="warning-outline" size={17} color={c.error} />
-            <Text style={{ color: c.textPrimary, flex: 1, fontSize: 13 }}>
+            <Text style={[t.bodySm, { color: c.textPrimary, flex: 1 }]}>
               You are over the selected carry-on limit. Remove extras, swap heavier grid items, or choose another airline profile.
             </Text>
+          </View>
+        )}
+
+        {isPackingDay && (
+          <View style={{ marginTop: space.xl }}>
+            <ActionBar testID="mark-all-packed-button" title="Mark all packed" onPress={markAllPacked} />
           </View>
         )}
       </ScrollView>
@@ -271,12 +351,12 @@ export default function Checklist() {
       {/* Sticky weight bar */}
       <View style={[styles.weightBar, { backgroundColor: c.bg, borderTopColor: c.borderSubtle }]}>
         <View style={{ flex: 1 }}>
-          <Text style={[styles.weightLabel, { color: c.textTertiary }]}>
+          <Text style={[t.kicker, { color: c.textTertiary }]}>
             TOTAL · {checkedCount}/{totalCount} CHECKED
           </Text>
-          <Text style={[styles.weightValue, { color: overLimit ? c.error : c.textPrimary }]}>
+          <Text style={[t.display, { color: overLimit ? c.error : c.textPrimary, marginTop: 2 }]}>
             {totalWeight.toFixed(2)} kg
-            <Text style={{ color: c.textTertiary, fontSize: 14 }}> / {carryOnLimitKg.toFixed(1)} kg</Text>
+            <Text style={[t.body, { color: c.textTertiary }]}> / {carryOnLimitKg.toFixed(1)} kg</Text>
           </Text>
         </View>
         <View style={[styles.weightCircle, { borderColor: overLimit ? c.error : c.accent }]}>
@@ -334,17 +414,17 @@ function CheckRow({
           },
         ]}
       >
-        {checked && <Ionicons name="checkmark" size={14} color={c.bg} />}
+        {checked && <Ionicons name="checkmark" size={14} color={c.accentInk} />}
       </View>
-      <View style={{ flex: 1, marginLeft: 12 }}>
-        <Text style={{ color: c.textPrimary, fontSize: 15, textDecorationLine: checked ? 'line-through' : 'none' }}>
+      <View style={{ flex: 1, marginLeft: space.md }}>
+        <Text style={[t.body, { color: c.textPrimary, textDecorationLine: checked ? 'line-through' : 'none' }]}>
           {title}
         </Text>
-        <Text style={{ color: c.textTertiary, fontSize: 11, letterSpacing: 1, marginTop: 2 }}>
+        <Text style={[t.kicker, { color: c.textTertiary, marginTop: 2 }]}>
           {subtitle}
         </Text>
       </View>
-      <Text style={{ color: c.textSecondary, fontSize: 12, marginRight: 8 }}>{weight.toFixed(2)}kg</Text>
+      <Text style={[t.micro, { color: c.textSecondary, marginRight: space.sm }]}>{weight.toFixed(2)}kg</Text>
       {onRemove && (
         <Pressable onPress={onRemove} hitSlop={8}>
           <Ionicons name="close" size={16} color={c.textTertiary} />
@@ -394,68 +474,34 @@ function AddExtraModal({
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalRoot}>
         <Pressable style={styles.modalBackdrop} onPress={onClose} />
         <View style={[styles.modalCard, { backgroundColor: c.surface, borderColor: c.borderSubtle }]}>
-          <Text style={[styles.h2, { color: c.textPrimary }]}>Add essential</Text>
+          <Text style={[t.h2, { color: c.textPrimary }]}>Add essential</Text>
 
-          <Text style={[styles.label, { color: c.textTertiary }]}>NAME</Text>
-          <TextInput
-            testID="extra-name-input"
-            value={name}
-            onChangeText={setName}
-            placeholder="Sunglasses"
-            placeholderTextColor={c.textTertiary}
-            style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive }]}
-          />
+          <View style={{ marginTop: space.md }}>
+            <TextField testID="extra-name-input" label="NAME" value={name} onChangeText={setName} placeholder="Sunglasses" />
+          </View>
 
-          <View style={{ height: 8 }} />
-          <Text style={[styles.label, { color: c.textTertiary }]}>CATEGORY</Text>
-          <View style={{ flexDirection: 'row', gap: 6 }}>
+          <Text style={[t.kicker, { color: c.textTertiary, marginTop: space.md, marginBottom: space.sm }]}>CATEGORY</Text>
+          <View style={{ flexDirection: 'row', gap: space.sm, flexWrap: 'wrap' }}>
             {['toiletries', 'documents', 'chargers', 'other'].map((x) => (
-              <Pressable
-                testID={`extra-cat-${x}`}
-                key={x}
-                onPress={() => setCat(x)}
-                style={[
-                  styles.miniChip,
-                  {
-                    borderColor: cat === x ? c.accent : c.borderSubtle,
-                    backgroundColor: cat === x ? c.accent : 'transparent',
-                  },
-                ]}
-              >
-                <Text style={{ color: cat === x ? c.bg : c.textSecondary, fontSize: 10, letterSpacing: 1, fontWeight: '600' }}>
-                  {x.toUpperCase()}
-                </Text>
-              </Pressable>
+              <Chip key={x} testID={`extra-cat-${x}`} label={x.toUpperCase()} active={cat === x} onPress={() => setCat(x)} />
             ))}
           </View>
 
-          <View style={{ height: 8 }} />
-          <Text style={[styles.label, { color: c.textTertiary }]}>WEIGHT (KG)</Text>
-          <TextInput
-            testID="extra-weight-input"
-            value={weight}
-            onChangeText={setWeight}
-            keyboardType="decimal-pad"
-            style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive }]}
-          />
+          <View style={{ marginTop: space.md }}>
+            <TextField testID="extra-weight-input" label="WEIGHT (KG)" value={weight} onChangeText={setWeight} keyboardType="decimal-pad" />
+          </View>
 
-          <View style={{ height: 16 }} />
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            <Pressable
-              testID="extra-cancel"
-              onPress={onClose}
-              style={[styles.modalBtn, { borderColor: c.borderActive, flex: 1 }]}
-            >
-              <Text style={{ color: c.textPrimary }}>Cancel</Text>
-            </Pressable>
-            <Pressable
+          <View style={{ height: space.lg }} />
+          <View style={{ flexDirection: 'row', gap: space.sm }}>
+            <Button testID="extra-cancel" title="Cancel" variant="secondary" onPress={onClose} style={{ flex: 1 }} />
+            <Button
               testID="extra-save"
+              title="Save"
               onPress={onSave}
-              disabled={!name.trim() || saving}
-              style={[styles.modalBtn, { backgroundColor: c.accent, flex: 1, opacity: !name.trim() ? 0.5 : 1 }]}
-            >
-              {saving ? <ActivityIndicator color={c.bg} /> : <Text style={{ color: c.bg, fontWeight: '600' }}>Save</Text>}
-            </Pressable>
+              disabled={!name.trim()}
+              loading={saving}
+              style={{ flex: 1 }}
+            />
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -464,49 +510,37 @@ function AddExtraModal({
 }
 
 const styles = StyleSheet.create({
-  kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
-  h1: { fontSize: 32, fontWeight: '700', letterSpacing: -1, marginTop: 4 },
-  h2: { fontSize: 20, fontWeight: '700' },
-  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 24 },
-  section: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
+  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: space.xl },
   smallBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderRadius: 4,
-    paddingHorizontal: 10, paddingVertical: 6,
+    flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderRadius: radius.pill,
+    paddingHorizontal: space.md, paddingVertical: space.xs,
   },
-  box: { borderWidth: 1, borderRadius: 8, marginTop: 12, overflow: 'hidden' },
-  progressPanel: { borderWidth: 1, borderRadius: 8, padding: 14, marginTop: 12, gap: 10 },
+  box: { borderWidth: 1, borderRadius: radius.sharp, marginTop: space.md, overflow: 'hidden' },
+  progressPanel: { borderWidth: 1, borderRadius: radius.sharp, padding: space.md, marginTop: space.md, gap: space.sm },
   progressLine: { gap: 6 },
-  progressTrack: { height: 5, borderRadius: 3, overflow: 'hidden' },
-  progressFill: { height: 5, borderRadius: 3 },
-  limitWarning: { borderWidth: 1, borderRadius: 8, padding: 14, marginTop: 12 },
+  progressTrack: { height: 5, borderRadius: radius.sharp, overflow: 'hidden' },
+  progressFill: { height: 5, borderRadius: radius.sharp },
+  limitWarning: { borderWidth: 1, borderRadius: radius.sharp, padding: space.md, marginTop: space.md },
   row: {
-    flexDirection: 'row', alignItems: 'center', padding: 16, borderBottomWidth: 1,
+    flexDirection: 'row', alignItems: 'center', padding: space.lg, borderBottomWidth: 1,
   },
-  box2: { width: 22, height: 22, borderWidth: 1, borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
+  box2: { width: 22, height: 22, borderWidth: 1, borderRadius: radius.sharp, alignItems: 'center', justifyContent: 'center' },
   weightBar: {
-    position: 'absolute', left: 0, right: 0, bottom: 0, padding: 16,
-    borderTopWidth: 1, flexDirection: 'row', alignItems: 'center', gap: 12,
+    position: 'absolute', left: 0, right: 0, bottom: 0, padding: space.lg,
+    borderTopWidth: 1, flexDirection: 'row', alignItems: 'center', gap: space.md,
   },
-  weightLabel: { fontSize: 10, letterSpacing: 2, fontWeight: '600' },
-  weightValue: { fontSize: 22, fontWeight: '700', marginTop: 4 },
   weightCircle: {
-    width: 44, height: 44, borderRadius: 22, borderWidth: 2,
+    width: 44, height: 44, borderRadius: radius.pill, borderWidth: 2,
     alignItems: 'center', justifyContent: 'center',
   },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
   modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)' },
   modalCard: {
-    padding: 24, paddingBottom: 36, borderTopLeftRadius: 16, borderTopRightRadius: 16,
+    padding: space.xl, paddingBottom: 36, borderTopLeftRadius: radius.sheet, borderTopRightRadius: radius.sheet,
     borderWidth: 1, borderBottomWidth: 0,
   },
-  label: { fontSize: 11, letterSpacing: 1.5, marginBottom: 6, marginTop: 12 },
-  input: { fontSize: 16, borderBottomWidth: 1, paddingVertical: 6 },
-  miniChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1 },
   airlineChip: {
-    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6, borderWidth: 1,
+    paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.sharp, borderWidth: 1,
     minWidth: 110,
-  },
-  modalBtn: {
-    paddingVertical: 14, borderWidth: 1, borderRadius: 4, alignItems: 'center', justifyContent: 'center',
   },
 });

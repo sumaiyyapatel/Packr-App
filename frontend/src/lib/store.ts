@@ -3,6 +3,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Trip, User, WardrobeItem } from './api';
 import { getToken, setToken, clearToken } from './tokenStorage';
 import {
+  currentAuthProvider,
+  deleteFirebaseUser,
   getCurrentFirebaseToken,
   isFirebaseAuthConfigured,
   loginWithFirebase,
@@ -21,6 +23,7 @@ const WARDROBE_CACHE_KEY = 'packr.wardrobe';
 const ONBOARDED_KEY = 'packr.onboarded';
 const SELECTED_TRIP_KEY = 'packr.selectedTripId';
 const SELECTED_AIRLINE_KEY = 'packr.airlineId';
+const CAPSULE_OFFERED_KEY = 'packr.capsuleOffered';
 
 async function readJson<T>(key: string): Promise<T | null> {
   try {
@@ -40,6 +43,7 @@ type State = {
   token: string | null;
   hydrated: boolean;
   onboarded: boolean;
+  capsuleOffered: boolean;
   trips: Trip[];
   wardrobe: WardrobeItem[];
   selectedTripId: string | null;
@@ -52,9 +56,13 @@ type State = {
   loginWithGoogleNative: () => Promise<void>;
   loginWithGoogleWeb: () => Promise<void>;
   logout: () => Promise<void>;
+  authProvider: () => string | null;
+  deleteAccount: (password?: string) => Promise<void>;
   finishOnboarding: () => Promise<void>;
+  dismissCapsuleOffer: () => Promise<void>;
   setUser: (u: User) => void;
   setSelectedAirline: (id: string | null) => void;
+  saveAirlineProfiles: (profiles: User['airline_profiles']) => Promise<void>;
 
   refreshAll: () => Promise<void>;
   refreshTrips: () => Promise<void>;
@@ -108,11 +116,24 @@ export const useStore = create<State>((set, get) => {
     return trip;
   }
 
+  async function clearLocalState(): Promise<void> {
+    await clearToken();
+    await AsyncStorage.multiRemove([
+      USER_CACHE_KEY,
+      TRIPS_CACHE_KEY,
+      WARDROBE_CACHE_KEY,
+      SELECTED_TRIP_KEY,
+      SELECTED_AIRLINE_KEY,
+    ]);
+    set({ token: null, user: null, trips: [], wardrobe: [], selectedTripId: null, selectedAirlineId: null });
+  }
+
   return {
     user: null,
     token: null,
     hydrated: false,
     onboarded: false,
+    capsuleOffered: false,
     trips: [],
     wardrobe: [],
     selectedTripId: null,
@@ -120,6 +141,7 @@ export const useStore = create<State>((set, get) => {
 
     hydrate: async () => {
       const onboarded = (await AsyncStorage.getItem(ONBOARDED_KEY)) === '1';
+      const capsuleOffered = (await AsyncStorage.getItem(CAPSULE_OFFERED_KEY)) === '1';
       const selectedTripId = await AsyncStorage.getItem(SELECTED_TRIP_KEY);
       const selectedAirlineId = await AsyncStorage.getItem(SELECTED_AIRLINE_KEY);
       const [cachedUser, cachedTrips, cachedWardrobe] = await Promise.all([
@@ -131,7 +153,7 @@ export const useStore = create<State>((set, get) => {
       const firebaseUser = await waitForFirebaseUser();
       if (!firebaseUser) {
         await clearToken();
-        set({ hydrated: true, onboarded, selectedTripId, selectedAirlineId });
+        set({ hydrated: true, onboarded, capsuleOffered, selectedTripId, selectedAirlineId });
         return;
       }
 
@@ -144,6 +166,7 @@ export const useStore = create<State>((set, get) => {
         user: cachedUser,
         token,
         onboarded,
+        capsuleOffered,
         selectedTripId,
         selectedAirlineId,
         trips: cachedTrips || [],
@@ -198,20 +221,28 @@ export const useStore = create<State>((set, get) => {
 
     logout: async () => {
       await logoutFirebase().catch(() => {});
-      await clearToken();
-      await AsyncStorage.multiRemove([
-        USER_CACHE_KEY,
-        TRIPS_CACHE_KEY,
-        WARDROBE_CACHE_KEY,
-        SELECTED_TRIP_KEY,
-        SELECTED_AIRLINE_KEY,
-      ]);
-      set({ token: null, user: null, trips: [], wardrobe: [], selectedTripId: null, selectedAirlineId: null });
+      await clearLocalState();
+    },
+
+    authProvider: () => currentAuthProvider(),
+
+    deleteAccount: async (password) => {
+      const uid = requireUid(get().user);
+      // Firestore rules key every write on request.auth.uid, so the wipe
+      // must finish while still authenticated — Auth deletion goes last.
+      await repo.wipeAllUserData(uid);
+      await deleteFirebaseUser(password);
+      await clearLocalState();
     },
 
     finishOnboarding: async () => {
       await AsyncStorage.setItem(ONBOARDED_KEY, '1');
       set({ onboarded: true });
+    },
+
+    dismissCapsuleOffer: async () => {
+      await AsyncStorage.setItem(CAPSULE_OFFERED_KEY, '1');
+      set({ capsuleOffered: true });
     },
 
     refreshAll: async () => {
@@ -256,6 +287,13 @@ export const useStore = create<State>((set, get) => {
     setUser: (u) => {
       writeJson(USER_CACHE_KEY, u);
       set({ user: u });
+    },
+
+    saveAirlineProfiles: async (profiles) => {
+      const uid = requireUid(get().user);
+      await repo.updateAirlineProfiles(uid, profiles);
+      const user = get().user;
+      if (user) get().setUser({ ...user, airline_profiles: profiles });
     },
 
     upsertTrip: (t) => {

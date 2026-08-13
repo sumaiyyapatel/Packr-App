@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
-  TextInput,
   Pressable,
   StyleSheet,
   KeyboardAvoidingView,
@@ -12,6 +11,8 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useTheme } from '../../src/theme/ThemeProvider';
+import { type as t, space, radius } from '../../src/theme/tokens';
+import { Kicker, TextField, Button } from '../../src/components/ui';
 import { useStore } from '../../src/lib/store';
 import { getApiErrorMessage } from '../../src/lib/api';
 import { fetchDailyForecast, geocodeCity } from '../../src/lib/weather';
@@ -150,25 +151,23 @@ export default function TripCreate() {
       style={{ flex: 1, backgroundColor: c.bg }}
     >
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        <Text style={[styles.kicker, { color: c.accent }]}>STEP 02 - YOUR FIRST TRIP</Text>
-        <Text style={[styles.h1, { color: c.textPrimary }]}>Where are you</Text>
-        <Text style={[styles.h1, { color: c.textPrimary }]}>going?</Text>
+        <Kicker>STEP 02 - YOUR FIRST TRIP</Kicker>
+        <Text style={[t.displayXl, { color: c.textPrimary, marginTop: space.xs }]}>Where are you</Text>
+        <Text style={[t.displayXl, { color: c.textPrimary }]}>going?</Text>
 
-        <View style={{ height: 32 }} />
-        <Text style={[styles.label, { color: c.textTertiary }]}>DESTINATION</Text>
-        <TextInput
+        <View style={{ height: space.xxl }} />
+        <TextField
           testID="trip-dest-input"
+          label="DESTINATION"
           value={destination}
           onChangeText={(value) => {
             setDestination(value);
             setPicked(null);
           }}
           placeholder="Tokyo, Lisbon, Mumbai"
-          placeholderTextColor={c.textTertiary}
-          style={[styles.input, { color: c.textPrimary, borderBottomColor: c.borderActive }]}
         />
 
-        {searching && <ActivityIndicator color={c.accent} style={{ marginTop: 8 }} />}
+        {searching && <ActivityIndicator color={c.accent} style={{ marginTop: space.sm }} />}
         {!picked && results.length > 0 && (
           <View style={[styles.resultBox, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
             {results.map((r, idx) => (
@@ -185,8 +184,8 @@ export default function TripCreate() {
                   { borderColor: c.borderSubtle, opacity: pressed ? 0.7 : 1 },
                 ]}
               >
-                <Text style={{ color: c.textPrimary, fontSize: 15 }}>{r.name}</Text>
-                <Text style={{ color: c.textTertiary, fontSize: 12 }}>
+                <Text style={[t.body, { color: c.textPrimary }]}>{r.name}</Text>
+                <Text style={[t.micro, { color: c.textTertiary }]}>
                   {[r.admin1, r.country].filter(Boolean).join(', ')}
                 </Text>
               </Pressable>
@@ -194,28 +193,28 @@ export default function TripCreate() {
           </View>
         )}
 
-        <View style={{ height: 24 }} />
-        <View style={{ flexDirection: 'row', gap: 12 }}>
+        <View style={{ height: space.xl }} />
+        <View style={{ flexDirection: 'row', gap: space.md }}>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.label, { color: c.textTertiary }]}>START</Text>
+            <Text style={[t.kicker, { color: c.textTertiary, marginBottom: space.sm }]}>START</Text>
             <Pressable
               testID="trip-start-input"
               onPress={() => showDatePicker('start')}
-              style={[styles.dateButton, { borderBottomColor: c.borderActive }]}
+              style={[styles.dateButton, { borderColor: c.borderActive, backgroundColor: c.elevated }]}
             >
-              <Text style={{ color: startDate ? c.textPrimary : c.textTertiary, fontSize: 18 }}>
+              <Text style={[t.body, { color: startDate ? c.textPrimary : c.textTertiary }]}>
                 {startDate || 'Pick date'}
               </Text>
             </Pressable>
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.label, { color: c.textTertiary }]}>END</Text>
+            <Text style={[t.kicker, { color: c.textTertiary, marginBottom: space.sm }]}>END</Text>
             <Pressable
               testID="trip-end-input"
               onPress={() => showDatePicker('end')}
-              style={[styles.dateButton, { borderBottomColor: c.borderActive }]}
+              style={[styles.dateButton, { borderColor: c.borderActive, backgroundColor: c.elevated }]}
             >
-              <Text style={{ color: endDate ? c.textPrimary : c.textTertiary, fontSize: 18 }}>
+              <Text style={[t.body, { color: endDate ? c.textPrimary : c.textTertiary }]}>
                 {endDate || 'Pick date'}
               </Text>
             </Pressable>
@@ -224,37 +223,23 @@ export default function TripCreate() {
 
         {weatherPreview && (
           <View style={[styles.weatherPreview, { borderColor: c.borderSubtle, backgroundColor: c.surface }]}>
-            <Text style={{ color: c.textPrimary, fontSize: 13, fontWeight: '700' }}>Weather preview</Text>
-            <Text style={{ color: c.textSecondary, fontSize: 13, marginTop: 4 }}>{weatherPreview}</Text>
+            <Text style={[t.title, { color: c.textPrimary }]}>Weather preview</Text>
+            <Text style={[t.bodySm, { color: c.textSecondary, marginTop: space.xs }]}>{weatherPreview}</Text>
           </View>
         )}
 
-        {err && <Text style={[styles.error, { color: c.error }]}>{err}</Text>}
+        {err && <Text style={[t.bodySm, { color: c.error, marginTop: space.md }]}>{err}</Text>}
 
-        <View style={{ height: 40 }} />
-        <Pressable
-          testID="trip-create-button"
-          onPress={onCreate}
-          disabled={loading}
-          style={({ pressed }) => [
-            styles.btn,
-            { backgroundColor: c.accent, opacity: pressed ? 0.85 : 1 },
-          ]}
-        >
-          {loading ? (
-            <ActivityIndicator color={c.bg} />
-          ) : (
-            <Text style={[styles.btnText, { color: c.bg }]}>Create Trip</Text>
-          )}
-        </Pressable>
+        <View style={{ height: space.xxxl }} />
+        <Button testID="trip-create-button" title="Create Trip" onPress={onCreate} loading={loading} />
 
         {trips.length > 0 && (
           <Pressable
             testID="trip-skip-button"
             onPress={() => router.replace('/(tabs)')}
-            style={{ paddingVertical: 12, alignItems: 'center', marginTop: 8 }}
+            style={{ paddingVertical: space.md, alignItems: 'center', marginTop: space.sm }}
           >
-            <Text style={{ color: c.textSecondary, fontSize: 14 }}>Skip - go to dashboard</Text>
+            <Text style={[t.body, { color: c.textSecondary }]}>Skip - go to dashboard</Text>
           </Pressable>
         )}
       </ScrollView>
@@ -275,16 +260,9 @@ function formatDate(date: Date) {
 }
 
 const styles = StyleSheet.create({
-  container: { flexGrow: 1, padding: 24, paddingTop: 80, paddingBottom: 48 },
-  kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
-  h1: { fontSize: 38, fontWeight: '700', letterSpacing: -1.5, lineHeight: 44 },
-  label: { fontSize: 11, letterSpacing: 1.5, marginBottom: 8, marginTop: 8 },
-  input: { fontSize: 18, borderBottomWidth: 1, paddingVertical: 8 },
-  dateButton: { borderBottomWidth: 1, minHeight: 42, justifyContent: 'center', paddingVertical: 10 },
-  weatherPreview: { borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 16 },
-  resultBox: { marginTop: 8, borderWidth: 1, borderRadius: 8, overflow: 'hidden' },
-  resultRow: { padding: 12, borderBottomWidth: 1 },
-  btn: { paddingVertical: 16, borderRadius: 4, alignItems: 'center' },
-  btnText: { fontSize: 16, fontWeight: '600', letterSpacing: 0.5 },
-  error: { marginTop: 12, fontSize: 13 },
+  container: { flexGrow: 1, padding: space.xl, paddingTop: 80, paddingBottom: space.xxxl },
+  dateButton: { borderWidth: 1, borderRadius: radius.sharp, minHeight: 48, justifyContent: 'center', paddingHorizontal: space.lg },
+  weatherPreview: { borderWidth: 1, borderRadius: radius.sharp, padding: space.md, marginTop: space.lg },
+  resultBox: { marginTop: space.sm, borderWidth: 1, borderRadius: radius.sharp, overflow: 'hidden' },
+  resultRow: { padding: space.md, borderBottomWidth: 1 },
 });

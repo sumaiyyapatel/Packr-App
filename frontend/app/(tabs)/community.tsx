@@ -379,7 +379,7 @@ export default function CommunityScreen() {
       >
         <View style={styles.headerRow}>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.kicker, { color: c.accent }]}>COMMUNITY</Text>
+            <Text style={[styles.kicker, { color: c.accentText }]}>COMMUNITY</Text>
             <Text style={[styles.h1, { color: c.textPrimary }]}>Travel feed</Text>
             <Text style={{ color: c.textTertiary, fontSize: 12, marginTop: 4 }}>
               Save packing ideas, comment, and follow packers.
@@ -466,8 +466,19 @@ export default function CommunityScreen() {
               },
             ]}
           >
-            <Ionicons name="share-social-outline" size={16} color={c.bg} />
-            <Text style={{ color: c.bg, fontSize: 12, letterSpacing: 1, fontWeight: '800' }}>
+            <Ionicons
+              name="share-social-outline"
+              size={16}
+              color={posting || !trip || !selectedTripComplete ? c.textTertiary : c.accentInk}
+            />
+            <Text
+              style={{
+                color: posting || !trip || !selectedTripComplete ? c.textTertiary : c.accentInk,
+                fontSize: 12,
+                letterSpacing: 1,
+                fontWeight: '800',
+              }}
+            >
               SHARE SCREENSHOT
             </Text>
           </Pressable>
@@ -588,8 +599,8 @@ function ProfileCard({
           </Text>
         </View>
         <Pressable onPress={onMine} style={[styles.profileButton, { borderColor: c.accent }]}>
-          <Ionicons name="person-circle-outline" size={15} color={c.accent} />
-          <Text style={{ color: c.accent, fontSize: 11, fontWeight: '900' }}>POSTS</Text>
+          <Ionicons name="person-circle-outline" size={15} color={c.accentText} />
+          <Text style={{ color: c.accentText, fontSize: 11, fontWeight: '900' }}>POSTS</Text>
         </Pressable>
       </View>
 
@@ -623,7 +634,7 @@ const ShareGridCard = React.forwardRef<View, { trip: Trip; itemsById: Record<str
       >
         <View style={styles.sharePreviewHeader}>
           <View>
-            <Text style={{ color: c.accent, fontSize: 11, letterSpacing: 2, fontWeight: '900' }}>PACKR GRID</Text>
+            <Text style={{ color: c.accentText, fontSize: 11, letterSpacing: 2, fontWeight: '900' }}>PACKR GRID</Text>
             <Text style={{ color: c.textPrimary, fontSize: 24, fontWeight: '900', marginTop: 2 }} numberOfLines={1}>
               {trip.destination}
             </Text>
@@ -663,7 +674,7 @@ const ShareGridCard = React.forwardRef<View, { trip: Trip; itemsById: Record<str
         <View style={styles.sharePreviewFooter}>
           <Text style={{ color: c.textPrimary, fontSize: 12, fontWeight: '900' }}>9 items</Text>
           <Text style={{ color: c.textPrimary, fontSize: 12, fontWeight: '900' }}>27 outfits</Text>
-          <Text style={{ color: c.accent, fontSize: 12, fontWeight: '900' }}>packr</Text>
+          <Text style={{ color: c.accentText, fontSize: 12, fontWeight: '900' }}>packr</Text>
         </View>
       </View>
     );
@@ -773,9 +784,9 @@ function PostCard({
               <Ionicons
                 name={post.is_following_author ? 'person-remove-outline' : 'person-add-outline'}
                 size={14}
-                color={post.is_following_author ? c.textSecondary : c.accent}
+                color={post.is_following_author ? c.textSecondary : c.accentText}
               />
-              <Text style={{ color: post.is_following_author ? c.textSecondary : c.accent, fontSize: 11, fontWeight: '800' }}>
+              <Text style={{ color: post.is_following_author ? c.textSecondary : c.accentText, fontSize: 11, fontWeight: '800' }}>
                 {post.is_following_author ? 'FOLLOWING' : 'FOLLOW'}
               </Text>
             </Pressable>
@@ -945,7 +956,7 @@ function PostCard({
             { backgroundColor: busy || !commentValue.trim() ? c.borderActive : c.accent },
           ]}
         >
-          <Ionicons name="send-outline" size={16} color={c.bg} />
+          <Ionicons name="send-outline" size={16} color={busy || !commentValue.trim() ? c.textTertiary : c.accentInk} />
         </Pressable>
       </View>
     </View>
@@ -972,8 +983,8 @@ function ActionButton({
       disabled={disabled}
       style={[styles.actionButton, { borderColor: active ? c.accent : c.borderSubtle }]}
     >
-      <Ionicons name={icon} size={17} color={active ? c.accent : c.textSecondary} />
-      <Text style={{ color: active ? c.accent : c.textSecondary, fontSize: 12, fontWeight: '800' }}>
+      <Ionicons name={icon} size={17} color={active ? c.accentText : c.textSecondary} />
+      <Text style={{ color: active ? c.accentText : c.textSecondary, fontSize: 12, fontWeight: '800' }}>
         {label}
       </Text>
     </Pressable>

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "packr-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "web", "--prefix", "frontend"],
+      "port": 8081
+    },
+    {
+      "name": "packr-landing",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8899", "--directory", "C:\\Users\\Sumaiyya\\Downloads"],
+      "port": 8899
+    }
+  ]
+}

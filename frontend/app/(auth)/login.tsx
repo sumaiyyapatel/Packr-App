@@ -161,9 +161,9 @@ export default function Login() {
           ]}
         >
           {loading ? (
-            <ActivityIndicator color={c.bg} />
+            <ActivityIndicator color={c.accentInk} />
           ) : (
-            <Text style={[styles.btnText, { color: c.bg }]}>Sign In</Text>
+            <Text style={[styles.btnText, { color: c.accentInk }]}>Sign In</Text>
           )}
         </Pressable>
 
@@ -205,7 +205,7 @@ export default function Login() {
           style={styles.linkBtn}
         >
           <Text style={[styles.link, { color: c.textSecondary }]}>
-            New here? <Text style={{ color: c.accent }}>Create an account</Text>
+            New here? <Text style={{ color: c.accentText }}>Create an account</Text>
           </Text>
         </Pressable>
       </ScrollView>

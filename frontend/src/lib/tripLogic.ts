@@ -197,14 +197,59 @@ export function scoreOutfitSuggestions(
   return suggestions.slice(0, 5);
 }
 
+// ---------- wear-count insights ----------
+
+export type ReflectionRecord = { worn_outfit_keys: string[]; unused_item_ids: string[] };
+export type WearInsight = { itemId: string; itemName: string; packedTrips: number; wornTrips: number };
+
+// Ranks items by how rarely they get worn relative to how often they're
+// packed — "packed 4 trips, worn once" is the actionable signal (an item
+// earning its luggage space vs. one that's dead weight).
+export function computeWearInsights(
+  trips: Trip[],
+  wardrobeById: Record<string, WardrobeItem>,
+  reflectionsByTripId: Record<string, ReflectionRecord[]>
+): WearInsight[] {
+  const stats: Record<string, { packed: number; worn: number }> = {};
+  for (const trip of trips) {
+    const reflections = reflectionsByTripId[trip.id];
+    if (!reflections?.length) continue;
+    const wornIds = new Set(reflections.flatMap((r) => r.worn_outfit_keys.flatMap((k) => k.split('|'))));
+    const gridIds = (trip.grid ?? []).filter((id): id is string => Boolean(id));
+    for (const id of gridIds) {
+      if (!wardrobeById[id]) continue;
+      const entry = (stats[id] ??= { packed: 0, worn: 0 });
+      entry.packed += 1;
+      if (wornIds.has(id)) entry.worn += 1;
+    }
+  }
+  return Object.entries(stats)
+    .map(([itemId, s]) => ({
+      itemId,
+      itemName: wardrobeById[itemId]?.name || 'Item',
+      packedTrips: s.packed,
+      wornTrips: s.worn,
+    }))
+    .filter((insight) => insight.packedTrips >= 2)
+    .sort(
+      (a, b) =>
+        a.wornTrips / a.packedTrips - b.wornTrips / b.packedTrips || b.packedTrips - a.packedTrips
+    );
+}
+
 // ---------- retention nudges ----------
+
+function localToday(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
 export function buildNudges(
   trips: Trip[],
   wardrobe: WardrobeItem[],
   reflectedTripIds: Set<string>
 ): TripNudge[] {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   const nudges: TripNudge[] = [];
 
   for (const trip of trips) {

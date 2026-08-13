@@ -175,9 +175,9 @@ export default function Register() {
           ]}
         >
           {loading ? (
-            <ActivityIndicator color={c.bg} />
+            <ActivityIndicator color={c.accentInk} />
           ) : (
-            <Text style={[styles.btnText, { color: c.bg }]}>Create Account</Text>
+            <Text style={[styles.btnText, { color: c.accentInk }]}>Create Account</Text>
           )}
         </Pressable>
 
@@ -219,7 +219,7 @@ export default function Register() {
           style={styles.linkBtn}
         >
           <Text style={[styles.link, { color: c.textSecondary }]}>
-            Have an account? <Text style={{ color: c.accent }}>Sign in</Text>
+            Have an account? <Text style={{ color: c.accentText }}>Sign in</Text>
           </Text>
         </Pressable>
       </ScrollView>

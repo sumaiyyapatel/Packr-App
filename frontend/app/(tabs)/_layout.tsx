@@ -2,6 +2,7 @@ import React from 'react';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
+import { fonts } from '../../src/theme/colors';
 
 export default function TabsLayout() {
   const { c } = useTheme();
@@ -19,7 +20,7 @@ export default function TabsLayout() {
           paddingTop: 6,
           paddingBottom: 8,
         },
-        tabBarLabelStyle: { fontSize: 10, letterSpacing: 1, fontWeight: '600' },
+        tabBarLabelStyle: { fontFamily: fonts.kicker, fontSize: 10, letterSpacing: 1 },
       }}
     >
       <Tabs.Screen

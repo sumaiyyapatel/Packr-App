@@ -4,15 +4,15 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  Pressable,
   ActivityIndicator,
   Alert,
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../../src/theme/ThemeProvider';
+import { type as t, space, radius } from '../../src/theme/tokens';
+import { Kicker, IconButton, Button } from '../../src/components/ui';
 import { getApiErrorMessage, Template } from '../../src/lib/api';
 import { getTemplate, isTemplateLiked, setTemplateLike } from '../../src/lib/firestoreRepo';
 import { useStore } from '../../src/lib/store';
@@ -98,35 +98,29 @@ export default function TemplateDetail() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
       <View style={[styles.header, { borderBottomColor: c.borderSubtle }]}>
-        <Pressable
-          testID="template-back"
-          onPress={() => router.back()}
-          style={[styles.iconBtn, { borderColor: c.borderSubtle }]}
-        >
-          <Ionicons name="chevron-back" size={20} color={c.textPrimary} />
-        </Pressable>
-        <Text style={[styles.kicker, { color: c.accent, marginLeft: 12 }]}>TEMPLATE</Text>
+        <IconButton testID="template-back" icon="chevron-back" accessibilityLabel="Back" onPress={() => router.back()} />
+        <Kicker>TEMPLATE</Kicker>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 32 }}>
-        <Text style={[styles.title, { color: c.textPrimary }]}>{tpl.title}</Text>
-        <View style={{ flexDirection: 'row', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-          <Tag color={c.accent} text={tpl.climate.toUpperCase()} />
+      <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: space.xxl }}>
+        <Text style={[t.h1, { color: c.textPrimary }]}>{tpl.title}</Text>
+        <View style={{ flexDirection: 'row', gap: space.sm, marginTop: space.md, flexWrap: 'wrap' }}>
+          <Tag color={c.accentText} text={tpl.climate.toUpperCase()} />
           <Tag color={c.textSecondary} text={`${tpl.days} DAYS`} />
           <Tag color={c.textSecondary} text={tpl.season.toUpperCase()} />
-          {tpl.is_official && <Tag color={c.accent} text="OFFICIAL" />}
+          {tpl.is_official && <Tag color={c.accentText} text="OFFICIAL" />}
         </View>
 
-        <Text style={{ color: c.textTertiary, fontSize: 12, marginTop: 12 }}>
+        <Text style={[t.micro, { color: c.textTertiary, marginTop: space.md }]}>
           {tpl.destination} · by {tpl.author_name || 'anonymous'} · ❤︎ {tpl.likes}
         </Text>
 
-        <Text style={{ color: c.textSecondary, fontSize: 14, marginTop: 16, lineHeight: 22 }}>
+        <Text style={[t.body, { color: c.textSecondary, marginTop: space.lg }]}>
           {tpl.description}
         </Text>
 
-        <View style={{ height: 24 }} />
-        <Text style={[styles.section, { color: c.textPrimary }]}>THE 9 ITEMS</Text>
+        <View style={{ height: space.xl }} />
+        <Text style={[t.kicker, { color: c.textPrimary, marginBottom: space.sm }]}>THE 9 ITEMS</Text>
         <View style={[styles.gridBox, { borderColor: c.borderSubtle }]}>
           {tpl.items.map((it, idx) => (
             <View
@@ -141,21 +135,21 @@ export default function TemplateDetail() {
                   />
                 ))}
               </View>
-              <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={{ color: c.textPrimary, fontSize: 14, fontWeight: '600' }}>
+              <View style={{ flex: 1, marginLeft: space.md }}>
+                <Text style={[t.title, { color: c.textPrimary }]}>
                   {it.name}
                 </Text>
-                <Text style={{ color: c.textTertiary, fontSize: 11, letterSpacing: 1, marginTop: 2 }}>
+                <Text style={[t.kicker, { color: c.textTertiary, marginTop: 2 }]}>
                   {it.category.toUpperCase()} · SLOT {idx + 1}
                 </Text>
               </View>
-              {it.tags?.slice(0, 1).map((t) => (
+              {it.tags?.slice(0, 1).map((tag) => (
                 <View
-                  key={t}
+                  key={tag}
                   style={[styles.miniTag, { borderColor: c.borderActive }]}
                 >
-                  <Text style={{ color: c.textSecondary, fontSize: 10, letterSpacing: 0.5 }}>
-                    #{t}
+                  <Text style={[t.micro, { color: c.textSecondary }]}>
+                    #{tag}
                   </Text>
                 </View>
               ))}
@@ -163,36 +157,22 @@ export default function TemplateDetail() {
           ))}
         </View>
 
-        <View style={{ height: 24 }} />
-        <Pressable
+        <View style={{ height: space.xl }} />
+        <Button
           testID="template-like-button"
+          title={liked ? 'Liked' : 'Like'}
+          icon={liked ? 'heart' : 'heart-outline'}
+          variant="secondary"
           onPress={onLike}
-          style={[styles.likeBtn, { borderColor: c.borderActive }]}
-        >
-          <Ionicons name={liked ? 'heart' : 'heart-outline'} size={16} color={liked ? c.accent : c.textPrimary} />
-          <Text style={{ color: liked ? c.accent : c.textPrimary, marginLeft: 8 }}>
-            {liked ? 'Liked' : 'Like'}
-          </Text>
-        </Pressable>
+        />
 
-        <View style={{ height: 12 }} />
-        <Pressable
+        <View style={{ height: space.md }} />
+        <Button
           testID="template-apply-button"
+          title="Apply to my trip"
           onPress={onApply}
-          disabled={applying}
-          style={({ pressed }) => [
-            styles.applyBtn,
-            { backgroundColor: c.accent, opacity: pressed ? 0.85 : 1 },
-          ]}
-        >
-          {applying ? (
-            <ActivityIndicator color={c.bg} />
-          ) : (
-            <Text style={{ color: c.bg, fontSize: 15, fontWeight: '600', letterSpacing: 0.5 }}>
-              APPLY TO MY TRIP
-            </Text>
-          )}
-        </Pressable>
+          loading={applying}
+        />
       </ScrollView>
     </SafeAreaView>
   );
@@ -201,22 +181,16 @@ export default function TemplateDetail() {
 function Tag({ color, text }: { color: string; text: string }) {
   return (
     <View style={[styles.tag, { borderColor: color }]}>
-      <Text style={{ color, fontSize: 10, letterSpacing: 1.5, fontWeight: '600' }}>{text}</Text>
+      <Text style={[t.kicker, { color, fontSize: 10 }]}>{text}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  header: { flexDirection: 'row', alignItems: 'center', padding: 16, borderBottomWidth: 1 },
-  iconBtn: { width: 36, height: 36, borderWidth: 1, borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
-  kicker: { fontSize: 11, letterSpacing: 2, fontWeight: '600' },
-  title: { fontSize: 28, fontWeight: '700', letterSpacing: -1 },
-  tag: { borderWidth: 1, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 4 },
-  section: { fontSize: 11, letterSpacing: 2, fontWeight: '600', marginBottom: 8 },
-  gridBox: { borderWidth: 1, borderRadius: 8, overflow: 'hidden' },
-  itemRow: { flexDirection: 'row', alignItems: 'center', padding: 14, borderBottomWidth: 1 },
+  header: { flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.lg, borderBottomWidth: 1 },
+  tag: { borderWidth: 1, paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: radius.pill },
+  gridBox: { borderWidth: 1, borderRadius: radius.sharp, overflow: 'hidden' },
+  itemRow: { flexDirection: 'row', alignItems: 'center', padding: space.md, borderBottomWidth: 1 },
   swatch: { width: 14, height: 14, borderRadius: 3, borderWidth: 1 },
-  miniTag: { borderWidth: 1, borderRadius: 3, paddingHorizontal: 6, paddingVertical: 2 },
-  likeBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderRadius: 4, paddingVertical: 14 },
-  applyBtn: { paddingVertical: 16, borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
+  miniTag: { borderWidth: 1, borderRadius: radius.sharp, paddingHorizontal: space.sm, paddingVertical: 2 },
 });

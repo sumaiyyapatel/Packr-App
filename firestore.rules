@@ -33,6 +33,10 @@ service cloud.firestore {
       match /saved_posts/{postId} {
         allow read, write: if isOwner(uid);
       }
+
+      match /private_templates/{templateId} {
+        allow read, write: if isOwner(uid);
+      }
     }
 
     // ---------- Templates: public read, guarded writes ----------
